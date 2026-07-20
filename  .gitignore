@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pkl
+*.log
+logs/
+.venv/
+.env
+intent_model.pkl
+*.db
+validity_reports/
+reports/
