@@ -123,7 +123,8 @@ class PrudenceFactory:
         # ---- 5. 特征存储 ----
         feature_store = NexusFeatureStore(
             config.feature_store.redis_host,
-            config.feature_store.redis_port
+            config.feature_store.redis_port,
+            enabled=config.feature_store.enable_redis,
         )
         logger.info("特征存储已创建")
 

@@ -82,7 +82,7 @@ class IntentModel:
             'n_estimators': 100, 'max_depth': 5, 'learning_rate': 0.1,
             'subsample': 0.8, 'colsample_bytree': 0.8,
             'scale_pos_weight': scale, 'eval_metric': 'auc',
-            'use_label_encoder': False, 'random_state': 42, 'verbosity': 1
+            'random_state': 42, 'verbosity': 1
         }
         params.update(kwargs)
         self.model = xgb.XGBClassifier(**params)

@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Any
 from enum import Enum
 from datetime import datetime
 from loguru import logger
+from logger import pseudonymize_identifier
 
 class DecisionAction(Enum):
     BLOCK_AND_REPLACE = "BLOCK_AND_REPLACE"
@@ -51,7 +52,11 @@ class AegisDecisionEngine:
     def decide(self, customer: Dict, product: Dict) -> UnifiedDecision:
         cid = customer.get("id", "unknown")
         pid = product.get("id", "unknown")
-        logger.info(f"Aegis 决策: {cid} -> {pid}")
+        logger.info(
+            "Aegis 决策: {} -> {}",
+            pseudonymize_identifier(cid),
+            pseudonymize_identifier(pid),
+        )
 
         # 1. 适当性
         suit = self.suitability_engine.check_suitability(customer, product)

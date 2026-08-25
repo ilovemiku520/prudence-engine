@@ -97,7 +97,7 @@ class FeatureStoreConfig:
     redis_host: str = "localhost"
     redis_port: int = 6379
     redis_db: int = 0
-    enable_redis: bool = True  # 改为 True
+    enable_redis: bool = Defaults.REDIS_ENABLE
     cache_ttl: int = 3600
 
 
@@ -107,8 +107,11 @@ class APIConfig:
     host: str = Defaults.API_HOST
     port: int = Defaults.API_PORT
     debug: bool = Defaults.API_DEBUG
-    cors_origins: List[str] = field(default_factory=lambda: ["*"])
+    cors_origins: List[str] = field(
+        default_factory=lambda: ["http://localhost:8501", "http://127.0.0.1:8501"]
+    )
     rate_limit_per_minute: int = 60
+    admin_token: str = ""
 
 
 @dataclass
@@ -158,6 +161,16 @@ class AppConfig:
         api.host = os.getenv("API_HOST", Defaults.API_HOST)
         api.port = int(os.getenv("API_PORT", str(Defaults.API_PORT)))
         api.debug = os.getenv("API_DEBUG", "false").lower() == "true"
+        cors_value = os.getenv("API_CORS_ORIGINS", "")
+        if cors_value:
+            api.cors_origins = [origin.strip() for origin in cors_value.split(",") if origin.strip()]
+        api.admin_token = os.getenv("PRUDENCE_ADMIN_TOKEN", "")
+
+        feature_store = config.feature_store
+        feature_store.redis_host = os.getenv("REDIS_HOST", Defaults.REDIS_HOST)
+        feature_store.redis_port = int(os.getenv("REDIS_PORT", str(Defaults.REDIS_PORT)))
+        feature_store.redis_db = int(os.getenv("REDIS_DB", str(Defaults.REDIS_DB)))
+        feature_store.enable_redis = os.getenv("REDIS_ENABLE", "false").lower() == "true"
 
         logger = config.logger
         logger.level = os.getenv("LOG_LEVEL", Defaults.LOG_LEVEL)

@@ -10,6 +10,7 @@ from loguru import logger
 
 from intent_subsystem import ALL_FEATURE_NAMES
 from data_source import DataSource
+from logger import pseudonymize_identifier
 
 
 # ================================================================
@@ -19,10 +20,14 @@ from data_source import DataSource
 class NexusFeatureStore:
     """特征存储 - 管理离线特征和实时特征"""
 
-    def __init__(self, redis_host="localhost", redis_port=6379):
+    def __init__(self, redis_host="localhost", redis_port=6379, enabled=False):
         self._offline_cache = {}
         self._realtime_cache = defaultdict(dict)
         self._redis = None
+
+        if not enabled:
+            logger.info("Redis 未启用，使用进程内缓存")
+            return
 
         try:
             import redis
@@ -119,18 +124,20 @@ class NexusOrchestrator:
     def orchestrate(self, customer_id: str, product_id: str) -> Dict:
         """完整决策编排流程"""
         start_time = time.time()
-        logger.info(f"开始编排: {customer_id} -> {product_id}")
+        logger.info(
+            "开始编排: {} -> {}",
+            pseudonymize_identifier(customer_id),
+            pseudonymize_identifier(product_id),
+        )
 
         try:
             customer_data = self.get_customer_info(customer_id)
             product_data = self.get_product_info(product_id)
 
             if not customer_data:
-                logger.warning(f"客户不存在: {customer_id}，使用默认数据")
-                customer_data = {"risk": "C3", "age": 40, "assets": 100000, "period": 365, "first_buy": False}
+                raise ValueError("客户不存在，拒绝使用默认画像代替真实输入")
             if not product_data:
-                logger.warning(f"产品不存在: {product_id}，使用默认数据")
-                product_data = {"risk": "R3", "name": "默认产品", "lock": 365, "min": 100000}
+                raise ValueError("产品不存在，拒绝使用默认产品代替真实输入")
 
             customer = {
                 "id": customer_id,

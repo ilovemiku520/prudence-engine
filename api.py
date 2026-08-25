@@ -8,12 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 import time
+import secrets
 from datetime import datetime
 
 # 导入各模块
 from main import PrudenceAPI
 from config import get_config, AppConfig
-from logger import get_logger, record_decision
+from logger import get_logger, record_decision, pseudonymize_identifier
 
 
 # ================================================================
@@ -22,13 +23,19 @@ from logger import get_logger, record_decision
 
 class DecisionRequest(BaseModel):
     """决策请求"""
-    customer_id: str = Field(..., description="客户ID")
-    product_id: str = Field(..., description="产品ID")
+    customer_id: str = Field(
+        ..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$", description="客户ID"
+    )
+    product_id: str = Field(
+        ..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$", description="产品ID"
+    )
 
 
 class BatchDecisionRequest(BaseModel):
     """批量决策请求"""
-    requests: List[DecisionRequest] = Field(..., description="决策请求列表")
+    requests: List[DecisionRequest] = Field(
+        ..., min_length=1, max_length=100, description="决策请求列表（最多 100 条）"
+    )
 
 
 class TopSignal(BaseModel):
@@ -56,8 +63,8 @@ class DecisionResponse(BaseModel):
     intent_score: float
     rule_score: float = 0.0
     model_score: float = 0.0
-    top_signals: List[TopSignal] = []
-    replacement_products: List[ReplacementProduct] = []
+    top_signals: List[TopSignal] = Field(default_factory=list)
+    replacement_products: List[ReplacementProduct] = Field(default_factory=list)
     reason: str
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
@@ -109,9 +116,9 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.api.cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials="*" not in config.api.cors_origins,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-Request-ID", "X-Admin-Token"],
     )
 
     # ================================================================
@@ -125,6 +132,13 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         if _api_instance is None:
             _api_instance = PrudenceAPI(config)
         return _api_instance
+
+    def require_admin(x_admin_token: Optional[str] = Header(None)) -> None:
+        expected = config.api.admin_token
+        if not expected:
+            raise HTTPException(status_code=503, detail="管理接口未启用")
+        if not x_admin_token or not secrets.compare_digest(x_admin_token, expected):
+            raise HTTPException(status_code=401, detail="管理令牌无效")
 
     # ================================================================
     # 4. API 路由
@@ -164,11 +178,15 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         trace_id = x_request_id or str(time.time_ns())
         try:
             logger.info(
-                f"决策请求: {request.customer_id} -> {request.product_id}",
+                "决策请求: "
+                f"{pseudonymize_identifier(request.customer_id)} -> "
+                f"{pseudonymize_identifier(request.product_id)}",
                 trace_id=trace_id
             )
 
             result = api.decide(request.customer_id, request.product_id)
+            if result.get("action") == "ERROR":
+                raise HTTPException(status_code=422, detail="无法完成决策，请检查客户或产品标识")
             latency_ms = (time.time() - start_time) * 1000
 
             # 记录决策到指标（包含延迟）
@@ -191,9 +209,11 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
             return DecisionResponse(**result)
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"决策失败: {str(e)}", traceback=str(e), trace_id=trace_id)
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="服务内部错误")
 
     @app.post("/api/decision/batch", response_model=BatchDecisionResponse)
     async def batch_decision(
@@ -207,6 +227,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         for req in request.requests:
             try:
                 result = api.decide(req.customer_id, req.product_id)
+                if result.get("action") == "ERROR":
+                    raise ValueError("invalid decision input")
                 results.append(result)
                 record_decision(result)
             except Exception as e:
@@ -216,7 +238,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                     "action": "ERROR",
                     "suitability_level": "UNKNOWN",
                     "intent_score": 0.0,
-                    "reason": str(e),
+                    "reason": "决策失败，请检查客户或产品标识",
                     "timestamp": datetime.now().isoformat()
                 })
 
@@ -229,6 +251,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.get("/api/customers")
     async def list_customers(
+            _admin: None = Depends(require_admin),
             api: PrudenceAPI = Depends(get_prudence_api),
     ):
         """获取所有客户列表"""
@@ -238,8 +261,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 customers = ds.list_customers()
                 return {"customers": customers, "total": len(customers)}
             return {"customers": ["CUST_HIGH", "CUST_LOW", "CUST_ELDER"], "total": 3}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=500, detail="服务内部错误")
 
     @app.get("/api/products")
     async def list_products(
@@ -252,12 +275,13 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 products = ds.list_products()
                 return {"products": products, "total": len(products)}
             return {"products": ["P001", "P002", "P004", "P005", "P006"], "total": 5}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=500, detail="服务内部错误")
 
     @app.get("/api/customer/{customer_id}")
     async def get_customer(
             customer_id: str,
+            _admin: None = Depends(require_admin),
             api: PrudenceAPI = Depends(get_prudence_api),
     ):
         """获取客户详情"""
@@ -271,8 +295,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             return {"error": "未找到数据源"}
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=500, detail="服务内部错误")
 
     @app.get("/api/product/{product_id}")
     async def get_product(
@@ -290,20 +314,24 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             return {"error": "未找到数据源"}
         except HTTPException:
             raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            raise HTTPException(status_code=500, detail="服务内部错误")
 
     @app.get("/api/metrics", response_model=MetricsResponse)
-    async def get_metrics():
+    async def get_metrics(_admin: None = Depends(require_admin)):
         """获取决策指标"""
         from logger import get_metrics
         return get_metrics()
 
     @app.get("/api/audit")
-    async def get_audit_logs(limit: int = 100):
+    async def get_audit_logs(
+            limit: int = 100,
+            _admin: None = Depends(require_admin),
+    ):
         """获取审计日志"""
         from logger import get_audit_logs
-        return {"logs": get_audit_logs(limit), "total": len(get_audit_logs())}
+        safe_limit = min(max(limit, 1), 500)
+        return {"logs": get_audit_logs(safe_limit), "total": len(get_audit_logs())}
 
     return app
 

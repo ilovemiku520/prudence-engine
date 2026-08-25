@@ -11,9 +11,20 @@ from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
 import uuid
+import hashlib
+import os
 
 # 全局审计日志存储（可替换为数据库）
 _audit_logs: List[Dict] = []
+
+
+def pseudonymize_identifier(value: str) -> str:
+    """保留跨日志关联能力，但不写入原始客户/产品标识。"""
+    if not value:
+        return ""
+    salt = os.getenv("PRUDENCE_AUDIT_SALT", "prudence-demo")
+    digest = hashlib.sha256(f"{salt}:{value}".encode("utf-8")).hexdigest()
+    return f"sha256:{digest[:16]}"
 
 
 class StructuredLogger:
@@ -93,8 +104,8 @@ class StructuredLogger:
         audit_record = {
             "timestamp": datetime.now().isoformat(),
             "event": event,
-            "customer_id": customer_id,
-            "product_id": product_id,
+            "customer_id": pseudonymize_identifier(customer_id),
+            "product_id": pseudonymize_identifier(product_id),
             "trace_id": trace_id,
             "details": details or {}
         }
