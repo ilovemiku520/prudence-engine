@@ -204,7 +204,7 @@ def structural_analysis(factors, factor_error, frame, row, alpha):
 
 
 def service_plan(frame, product_id, selection, scenario_context):
-    st.caption("把同一看板中的客户转为本次服务候选。仅纳入数据完整、适当性可通过且有正向目标效用的客户。此处只生成计划。")
+    st.caption("把同一看板中的客户转为本次服务候选。仅纳入数据完整、适当性可通过、有有效理财配置且目标效用为正的客户。此处只生成计划。")
     a, b, c, d = st.columns(4)
     target = a.selectbox("分配目标", ["综合观察分", "情景年度贡献"], key="allocation_target")
     budget = b.number_input("本次触达预算（元）", 0., 1e8, 1000., key="allocation_budget")
@@ -213,7 +213,8 @@ def service_plan(frame, product_id, selection, scenario_context):
     only = st.checkbox(f"只使用图中圈选客户（{len(selection)} 位）", value=False, key="selected_only")
     pool = frame.loc[frame.customer_id.isin(selection)] if only else frame
     utility = "score" if target == "综合观察分" else "annual_contribution"
-    pool = pool.loc[pool.score.notna() & pool.suitability_level.eq("ALLOW") & pool[utility].gt(0)].copy()
+    pool = pool.loc[pool.score.notna() & pool.suitability_level.eq("ALLOW") &
+                    pool.wealth_balance.gt(0) & pool[utility].gt(0)].copy()
     candidates = pd.DataFrame({"customer_id": pool.customer_id, "product_id": product_id,
         "suitability_level": pool.suitability_level, "utility": pool[utility], "cost": cost})
     signature = hashlib.sha256((candidates.to_json() + str((budget, cost, limit, target)) + scenario_context).encode()).hexdigest()

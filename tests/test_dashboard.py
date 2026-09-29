@@ -79,6 +79,12 @@ def test_scenario_edits_and_plan_invalidation(api):
     click(at, "应用利率与策略")
     assert any("100%" in item.value for item in at.error)
     assert at.session_state["scenario_settings"]["rates"]["deposit_share"] == .6
+    at.slider(key="ds_P002").set_value(60)
+    at.slider(key="ws_P002").set_value(0)
+    click(at, "应用利率与策略")
+    at.number_input(key="allocation_budget").set_value(1000.).run()
+    click(at, "生成服务计划")
+    assert at.session_state["allocation"][1].selected.empty
 
 
 def test_csv_export_preserves_chinese_and_neutralizes_formulas():
