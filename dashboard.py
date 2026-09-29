@@ -9,13 +9,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from analytics import optimize_allocation
 from config import get_config
 from customer_scoring import (DIMENSIONS, SIGNALS, ValueScenario, composite, customer_scores,
                               factor_inputs, fit_factors, scenario_values, selected_customer_ids)
 from dashboard_data import (activate_source, chart, data_page, download_csv, hero, style)
 from dashboard_ai import ai_panel
-from main import PrudenceAPI
+from dashboard_context import DashboardContext
 from workbench_data import demo_source, source_tables
 
 LEVELS = {"ALLOW": "可通过", "RESTRICTED": "需复核", "FORBID": "已拦截"}
@@ -27,7 +26,7 @@ DISPLAY = {"customer_id": "客户 ID", "name": "客户", "score": "综合观察�
            "coverage": "画像完整维度", "missing": "待补充指标"}
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=16)
 def factors_for(frame, n_factors):
     return fit_factors(frame, n_factors)
 
@@ -148,7 +147,11 @@ def profile_panel(frame, scenario):
 
 
 def profile_details(row, scenario):
-    with st.expander("所选客户 · 评分依据与贡献拆解", expanded=False):
+    details = st.expander("所选客户 · 评分依据与贡献拆解", expanded=False,
+                          key="profile_details", on_change="rerun")
+    if not details.open:
+        return
+    with details:
         a, b = st.columns([1, 1.3])
         with a:
             st.dataframe(pd.DataFrame({"维度": DIMENSIONS, "得分 / 100": row[DIMENSIONS].values}), hide_index=True, use_container_width=True)
@@ -220,6 +223,8 @@ def service_plan(frame, product_id, selection, scenario_context):
         "suitability_level": pool.suitability_level, "utility": pool[utility], "cost": cost})
     signature = hashlib.sha256((candidates.to_json() + str((budget, cost, limit, target)) + scenario_context).encode()).hexdigest()
     if st.button("生成服务计划", type="primary"):
+        from analytics import optimize_allocation
+
         try:
             result = optimize_allocation(candidates, budget, int(limit), {product_id: int(limit)})
             st.session_state.allocation = (signature, result)
@@ -254,13 +259,16 @@ def methodology(scenario, product, alpha):
 def main():
     st.set_page_config(page_title="睿衡 · 客户价值看板", page_icon="◈", layout="wide")
     style()
+    if "api" in st.session_state and not isinstance(st.session_state.api, DashboardContext):
+        # Preserve imported data when a running session receives this upgrade.
+        st.session_state.api = DashboardContext.create(get_config(), st.session_state.api.data_source)
     if "api" not in st.session_state:
         with st.spinner("正在准备客户数据…"):
             config = get_config()
             if config.data_source.type == "mock":
                 activate_source(demo_source(), "模拟数据 · 120 位客户 · seed 42")
             else:
-                st.session_state.api = PrudenceAPI(config)
+                st.session_state.api = DashboardContext.create(config)
                 st.session_state.source_label = f"配置数据源 · {config.data_source.type}"
     api = st.session_state.api
     customers, products = source_tables(api.data_source)
@@ -285,15 +293,18 @@ def main():
         levels = st.multiselect("适当性筛选", list(LEVELS.values()), default=list(LEVELS.values()), key="level_filter")
         search = st.text_input("搜索客户姓名或 ID", key="customer_search")
         st.caption("筛选只改变观察人群，不改变同一客户的评分、金额假设或因子坐标。")
-    frame = scenario_values(customer_scores(api.data_source, api.engines["suitability"], product_id,
+    frame = scenario_values(customer_scores(api.data_source, api.suitability, product_id,
         product, alpha, planned_wealth_share=scenario.wealth_share), product, scenario)
     frame["status"] = frame.suitability_level.map(LEVELS)
-    factors, factor_error = None, ""
-    try:
-        factors = factors_for(factor_inputs(api.data_source), n_factors)
-        frame = frame.join(factors["scores"])
-    except ValueError as error:
-        factor_error = str(error)
+    factors, factor_error = None, "共同因子在切换到因子视角、分析页或 AI 因子解读时计算。"
+    if (st.session_state.get("scatter_mode") == MODES[2]
+            or st.session_state.get("analysis_tab") == "共同因子与稳定性"
+            or st.session_state.get("ai_scope") == "共同因子分析"):
+        try:
+            factors = factors_for(factor_inputs(api.data_source), n_factors)
+            frame = frame.join(factors["scores"])
+        except ValueError as error:
+            factor_error = str(error)
     visible = frame.loc[frame.status.isin(levels)].copy()
     if search:
         visible = visible.loc[visible.customer_id.str.contains(search, case=False, regex=False) |
@@ -343,7 +354,8 @@ def main():
         with right:
             row = profile_panel(visible, scenario)
         profile_details(row, scenario)
-        tabs = st.tabs(["客户榜单", "AI 辅助解读", "共同因子与稳定性", "服务计划", "口径与研究", "数据与导入"])
+        tabs = st.tabs(["客户榜单", "AI 辅助解读", "共同因子与稳定性", "服务计划", "口径与研究", "数据与导入"],
+                       key="analysis_tab", on_change="rerun")
         with tabs[0]:
             ranked = visible.sort_values("score", ascending=False, na_position="last")
             output = ranked[list(DISPLAY)].rename(columns=DISPLAY)
@@ -352,7 +364,8 @@ def main():
         with tabs[1]:
             ai_panel(visible, product, scenario, alpha, row, factors, factor_error)
         with tabs[2]:
-            structural_analysis(factors, factor_error, visible, row, alpha)
+            if tabs[2].open:
+                structural_analysis(factors, factor_error, visible, row, alpha)
         with tabs[3]:
             service_plan(visible, product_id, st.session_state.get("selected_customers", []),
                          json.dumps(dict(scenario=asdict(scenario), product=product, alpha=alpha), sort_keys=True))

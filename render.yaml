@@ -1,0 +1,14 @@
+# Optional fallback. Deploying this blueprint requires your Render account.
+services:
+  - type: web
+    name: prudence-engine
+    runtime: docker
+    plan: free
+    region: singapore
+    repo: https://github.com/ilovemiku520/prudence-engine
+    branch: master
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: DS_TYPE
+        value: mock

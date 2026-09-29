@@ -1,0 +1,10 @@
+# Optional prediction engine, CLI decisions and REST API.
+-r requirements.txt
+xgboost>=1.7.0
+shap>=0.41.0
+loguru>=0.7.0
+redis>=5.0.0
+sqlalchemy>=2.0.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0

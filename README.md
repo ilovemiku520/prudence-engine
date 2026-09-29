@@ -26,6 +26,8 @@
 
 [访问演示站](https://prudence-engine-ilovemiku520.streamlit.app/) · 演示站的部署版本可能与当前分支不同。默认看板使用固定种子的 **120 位模拟客户**，无需连接数据库或填写 AI 密钥即可体验统计功能。
 
+看板采用轻量启动：不加载 XGBoost / SHAP、不训练意图模型；因子分析和画像贡献拆解按需计算。免费托管仍可能休眠或遇到网络等待。容器运行及免费备用部署见 [部署与性能](docs/deployment.md)。
+
 <a id="features"></a>
 ## 一张看板，完整分析路径
 
@@ -127,6 +129,7 @@ flowchart LR
 | [研究到实现](docs/customer-scoring-research.md) | 论文、开源参考及实现取舍 |
 | [AI 接入](docs/ai-analysis.md) | 模型协议、密钥、发送摘要和错误处理 |
 | [维护与迁移](docs/maintenance.md) | 验证方式、代码分层、旧入口迁移与 README 设计参考 |
+| [部署与性能](docs/deployment.md) | 启动优化、免费平台限制、Docker 和 Render 备用方案 |
 
 ## 开发与验证
 

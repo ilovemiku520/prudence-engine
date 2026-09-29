@@ -8,8 +8,6 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import FactorAnalysis
-from sklearn.exceptions import ConvergenceWarning
 
 DIMENSIONS = ["近期活跃", "决策投入", "互动响应", "风险适配", "资金余量", "期限匹配"]
 SIGNALS = {
@@ -165,6 +163,9 @@ def factor_inputs(source):
 
 def fit_factors(frame, n_factors=2):
     """Exploratory ML factor analysis with varimax and deterministic sign orientation."""
+    from sklearn.decomposition import FactorAnalysis
+    from sklearn.exceptions import ConvergenceWarning
+
     clean = frame.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     dropped_columns = clean.columns[clean.std(ddof=0).fillna(0) < 1e-10].tolist()
     clean = clean.drop(columns=dropped_columns)

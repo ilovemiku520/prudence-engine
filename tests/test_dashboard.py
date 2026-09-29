@@ -5,16 +5,14 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from config import AppConfig
-from main import PrudenceAPI
+from dashboard_context import DashboardContext
 from workbench_data import demo_source
 
 
 @pytest.fixture(scope="module")
-def api(tmp_path_factory):
+def api():
     config = AppConfig()
-    config.intent.model_path = str(tmp_path_factory.mktemp("models") / "intent.pkl")
-    config.intent.max_training_samples = 300
-    return PrudenceAPI(config, data_source=demo_source(size=48))
+    return DashboardContext.create(config, demo_source(size=48))
 
 
 def app(api):

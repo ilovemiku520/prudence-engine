@@ -67,7 +67,7 @@ def validate_table(frame, kind):
             raise ValueError("age 必须在 0–120 之间。")
         frame["first_buy"] = frame.get("first_buy", pd.Series(False, index=frame.index)).map(parse_boolean)
     if kind == "intent_features":
-        from intent_subsystem import ALL_FEATURE_NAMES
+        from feature_schema import ALL_FEATURE_NAMES
         if not frame.feature_name.isin(ALL_FEATURE_NAMES).all():
             raise ValueError("意图表包含未注册的 feature_name，请使用示例中的特征名。")
     return frame
@@ -109,7 +109,7 @@ def source_tables(source):
 
 def demo_source(size=120, seed=42):
     from data_source import MemoryDataSource, MockDataSource
-    from intent_subsystem import ALL_FEATURE_NAMES
+    from feature_schema import ALL_FEATURE_NAMES
     rng = np.random.default_rng(seed)
     base = MockDataSource()
     customers, features = {}, {}

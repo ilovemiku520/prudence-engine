@@ -40,6 +40,10 @@ CUST_001,beh_view_cnt_7d,8
 
 ## 环境变量
 
+### 安装范围
+
+统一看板仅需 `python -m pip install -r requirements.txt`。独立 CLI 决策和 REST API 还需执行 `python -m pip install -r requirements-engine.txt`，其中包括预测模型、SHAP 和服务依赖。`requirements-dev.txt` 会安装完整依赖供测试使用。模型与 Redis 环境变量仅影响独立决策链路，不影响看板启动。
+
 `.env.example` 是配置清单，应用**不自动读取 `.env` 文件**。请在启动进程前由终端、容器或托管平台注入变量。统计看板不需要模型密钥；个人 AI 配置可直接在页面填写。
 
 | 变量 | 默认值 / 用途 |

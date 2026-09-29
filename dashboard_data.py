@@ -4,7 +4,7 @@ import json
 import streamlit as st
 from config import get_config
 from data_source import build_dataframe_data_source, MockDataSource
-from main import PrudenceAPI
+from dashboard_context import DashboardContext
 from workbench_data import demo_source, read_upload, source_tables
 COLORS = ["#0f766e", "#7298c4", "#e8b768", "#b49cc8", "#e78e89"]
 
@@ -62,7 +62,7 @@ def download_csv(frame, label, filename):
 
 
 def activate_source(source, label):
-    api = PrudenceAPI(get_config(), data_source=source)
+    api = DashboardContext.create(get_config(), source)
     for key in list(st.session_state):
         if key not in {"api", "source_label"}:
             st.session_state.pop(key, None)
