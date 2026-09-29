@@ -31,7 +31,7 @@ jobs:
       - name: Check the container HTTP endpoint and rendered dashboard
         run: |
           docker run -d --name prudence-smoke -p 127.0.0.1:8501:8501 prudence-dashboard
-          curl --fail --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:8501/_stcore/health
+          curl --fail --retry 20 --retry-all-errors --retry-delay 1 --retry-max-time 60 --max-time 5 http://127.0.0.1:8501/_stcore/health
           docker exec prudence-smoke python -c "from streamlit.testing.v1 import AppTest; at=AppTest.from_file('ui.py', default_timeout=60).run(); assert not at.exception, [e.message for e in at.exception]; assert at.metric[0].value == '120'; at.radio(key='scatter_mode').set_value('因子 1 × 因子 2').run(); assert not at.exception"
       - name: Container logs
         if: failure()
