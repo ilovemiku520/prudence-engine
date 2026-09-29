@@ -7,8 +7,8 @@
 """
 API 服务层 - 提供 RESTful 接口
 """
-from typing import Optional, Dict, Any, List, Literal
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from typing import Optional, List, Literal
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -125,7 +125,7 @@ def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISetti
 
     app = FastAPI(
         title="睿衡引擎 API",
-        description="适当性与意图联合决策引擎",
+        description="客户价值分析原型：适当性优先的决策接口与多模型 AI 辅助解读",
         version="2.0.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -316,11 +316,8 @@ def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISetti
     ):
         """获取所有客户列表"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                customers = ds.list_customers()
-                return {"customers": customers, "total": len(customers)}
-            return {"customers": ["CUST_HIGH", "CUST_LOW", "CUST_ELDER"], "total": 3}
+            customers = api.data_source.list_customers()
+            return {"customers": customers, "total": len(customers)}
         except Exception:
             raise HTTPException(status_code=500, detail="服务内部错误")
 
@@ -330,11 +327,8 @@ def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISetti
     ):
         """获取所有产品列表"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                products = ds.list_products()
-                return {"products": products, "total": len(products)}
-            return {"products": ["P001", "P002", "P004", "P005", "P006"], "total": 5}
+            products = api.data_source.list_products()
+            return {"products": products, "total": len(products)}
         except Exception:
             raise HTTPException(status_code=500, detail="服务内部错误")
 
@@ -346,13 +340,10 @@ def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISetti
     ):
         """获取客户详情"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                info = ds.get_customer(customer_id)
-                if not info:
-                    raise HTTPException(status_code=404, detail="客户不存在")
-                return info
-            return {"error": "未找到数据源"}
+            info = api.data_source.get_customer(customer_id)
+            if not info:
+                raise HTTPException(status_code=404, detail="客户不存在")
+            return info
         except HTTPException:
             raise
         except Exception:
@@ -365,13 +356,10 @@ def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISetti
     ):
         """获取产品详情"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                info = ds.get_product(product_id)
-                if not info:
-                    raise HTTPException(status_code=404, detail="产品不存在")
-                return info
-            return {"error": "未找到数据源"}
+            info = api.data_source.get_product(product_id)
+            if not info:
+                raise HTTPException(status_code=404, detail="产品不存在")
+            return info
         except HTTPException:
             raise
         except Exception:

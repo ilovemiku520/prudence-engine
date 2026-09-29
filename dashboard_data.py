@@ -1,7 +1,6 @@
 """Shared presentation and data import helpers for the integrated customer dashboard."""
 from html import escape
 import json
-import pandas as pd
 import streamlit as st
 from config import get_config
 from data_source import build_dataframe_data_source, MockDataSource

@@ -88,7 +88,7 @@ def test_scenario_edits_and_plan_invalidation(api):
 
 
 def test_csv_export_preserves_chinese_and_neutralizes_formulas():
-    from dashboard import csv_bytes
+    from dashboard_data import csv_bytes
     output = csv_bytes(pd.DataFrame({"客户": ["=1+2", " +cmd", "张三"]})).decode("utf-8-sig")
     assert "'=1+2" in output and "' +cmd" in output and "张三" in output
 

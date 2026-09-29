@@ -5,7 +5,7 @@
 # Repository: https://github.com/ilovemiku520/prudence-engine
 # prudence_suitability.py
 from enum import Enum
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, field
 
 

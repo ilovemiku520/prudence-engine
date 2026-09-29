@@ -13,7 +13,7 @@ from analytics import optimize_allocation
 from config import get_config
 from customer_scoring import (DIMENSIONS, SIGNALS, ValueScenario, composite, customer_scores,
                               factor_inputs, fit_factors, scenario_values, selected_customer_ids)
-from dashboard_data import (activate_source, chart, csv_bytes, data_page, download_csv, hero, style)
+from dashboard_data import (activate_source, chart, data_page, download_csv, hero, style)
 from dashboard_ai import ai_panel
 from main import PrudenceAPI
 from workbench_data import demo_source, source_tables

@@ -6,14 +6,11 @@
 # intent_subsystem.py
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 import pickle
 import os
-import warnings
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.metrics import roc_auc_score
 import xgboost as xgb
 
 # SHAP 可选
