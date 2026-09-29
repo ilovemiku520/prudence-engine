@@ -56,6 +56,13 @@ def validate_table(frame, kind):
         if column in {"age", "period", "lock"} and (frame[column] % 1 != 0).any():
             raise ValueError(f"{column} 必须是整数。")
     if kind == "customers":
+        if "loan_balance" in frame:
+            raw = frame.loan_balance
+            loan = pd.to_numeric(raw, errors="coerce")
+            invalid = raw.notna() & (~np.isfinite(loan) | (loan < 0))
+            if invalid.any():
+                raise ValueError("loan_balance 必须为空或非负有限数值。")
+            frame["loan_balance"] = loan
         if (frame.age > 120).any():
             raise ValueError("age 必须在 0–120 之间。")
         frame["first_buy"] = frame.get("first_buy", pd.Series(False, index=frame.index)).map(parse_boolean)
@@ -125,6 +132,8 @@ def demo_source(size=120, seed=42):
                    txn_avg_holding_period=float(rng.integers(30, 500)),
                    profile_aum_tier=float(np.clip(assets // 300000 + 1, 1, 5)),
                    profile_lifecycle_stage=3.0, profile_risk_level=float(risk),
-                   interact_push_open_rate_30d=float(rng.beta(2, 4)))
+                   interact_push_open_rate_30d=float(rng.beta(2, 4)),
+                   interact_advisor_contact_freq=float(rng.poisson(engagement)),
+                   interact_last_script_accepted=float(rng.random() < engagement / 4))
         features[cid] = row
     return MemoryDataSource(customers, {pid: base.get_product(pid) for pid in base.list_products()}, features)

@@ -363,6 +363,8 @@ def build_dataframe_data_source(
                     'name': str(row.get('name', '')),
                     'income': str(row.get('income', ''))
                 }
+                if 'loan_balance' in row and pd.notna(row['loan_balance']):
+                    customers[cid]['loan_balance'] = float(row['loan_balance'])
 
     products = {}
     if products_df is not None and not products_df.empty:

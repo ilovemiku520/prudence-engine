@@ -14,7 +14,7 @@ def api(tmp_path_factory):
     config = AppConfig()
     config.intent.model_path = str(tmp_path_factory.mktemp("models") / "intent.pkl")
     config.intent.max_training_samples = 300
-    return PrudenceAPI(config, data_source=demo_source(size=12))
+    return PrudenceAPI(config, data_source=demo_source(size=48))
 
 
 def app(api):
@@ -24,54 +24,61 @@ def app(api):
     return at.run()
 
 
-def navigate(at, page):
-    at.radio(key="navigation").set_value(page).run()
-    assert not at.exception, [e.message for e in at.exception]
-
-
 def click(at, label):
     next(button for button in at.button if button.label == label).click().run()
     assert not at.exception, [e.message for e in at.exception]
 
 
-def test_all_pages_and_editable_experiments(api):
+def test_integrated_dashboard_views_profile_and_filters(api):
     at = app(api)
-    assert not at.exception
-    assert at.metric[0].value == "12"
-    for page in ["多元统计", "矩阵实验室", "运筹优化", "博弈实验", "数据管理"]:
-        navigate(at, page)
-    navigate(at, "矩阵实验室")
-    next(r for r in at.radio if r.label == "矩阵来源").set_value("自定义矩阵").run()
-    at.text_area[0].set_value("1, 2\n2, 4").run()
-    assert not at.exception
+    assert not at.exception, [e.message for e in at.exception]
+    assert at.metric[0].value == "48"
+    assert len(at.tabs) == 5
+    for mode in ["关注度 × 年度贡献", "因子 1 × 因子 2", "关注度 × 匹配度"]:
+        at.radio(key="scatter_mode").set_value(mode).run()
+        assert not at.exception, [e.message for e in at.exception]
+    at.selectbox(key="focus_customer").set_value("DEMO_002").run()
+    assert at.session_state["focus_customer"] == "DEMO_002"
+    at.text_input(key="customer_search").set_value("DEMO_001").run()
     assert at.metric[0].value == "1"
-    at.text_area[0].set_value("1 2\n3").run()
-    assert at.error and not at.exception
-    navigate(at, "博弈实验")
-    next(r for r in at.radio if r.label == "实验类型").set_value("双矩阵博弈 · 纯策略 Nash").run()
-    assert not at.exception
-    assert "背离" in at.success[0].value
+    assert at.session_state["focus_customer"] == "DEMO_001"
+    at.text_input(key="customer_search").set_value("DOES_NOT_EXIST").run()
+    assert at.metric[0].value == "0" and not at.exception
 
 
-def test_decisions_feed_optimizer_and_parameter_changes_invalidate_result(api):
+def test_point_selection_uses_customer_id_and_manual_fallback(api):
     at = app(api)
-    navigate(at, "决策分析")
-    click(at, "运行决策分析")
-    assert len(at.session_state["batch"]) == 30
-    assert all(item["action"] != "ERROR" for item in at.session_state["batch"])
-    navigate(at, "运筹优化")
-    click(at, "求解最优分配")
+    key = at.session_state["scatter_key"]
+    at.session_state[key] = {"selection": {"points": [{"point_index": 0, "curve_number": 2, "customdata": ["DEMO_004"]}]}}
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert at.session_state["focus_customer"] == "DEMO_004"
+    assert at.session_state["selected_customers"] == ["DEMO_004"]
+    at.selectbox(key="focus_customer").set_value("DEMO_006").run()
+    assert at.session_state["focus_customer"] == "DEMO_006"
+    at.selectbox(key="product_id").set_value("P002").run()
+    assert at.session_state["selected_customers"] == []
+
+
+def test_scenario_edits_and_plan_invalidation(api):
+    at = app(api)
+    at.selectbox(key="product_id").set_value("P002").run()
+    old_contribution = at.metric[3].value
+    at.number_input(key="rate_deposit_rate_P002").set_value(3.)
+    click(at, "应用利率与策略")
+    assert at.metric[3].value != old_contribution
+    click(at, "生成服务计划")
     selected = at.session_state["allocation"][1].selected
     assert selected.suitability_level.eq("ALLOW").all()
     assert not selected.customer_id.duplicated().any()
-    at.number_input[0].set_value(0.0).run()
-    assert any("参数已改变" in message.value for message in at.info)
-    click(at, "求解最优分配")
+    at.number_input(key="allocation_budget").set_value(0.).run()
+    assert any("参数已改变" in item.value for item in at.info)
+    click(at, "生成服务计划")
     assert at.session_state["allocation"][1].selected.empty
-    navigate(at, "决策分析")
-    at.multiselect[0].set_value([]).run()
-    click(at, "运行决策分析")
-    assert at.error
+    at.slider(key="ds_P002").set_value(90)
+    click(at, "应用利率与策略")
+    assert any("100%" in item.value for item in at.error)
+    assert at.session_state["scenario_settings"]["rates"]["deposit_share"] == .6
 
 
 def test_csv_export_preserves_chinese_and_neutralizes_formulas():

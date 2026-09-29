@@ -1,6 +1,6 @@
-"""睿衡引擎 · 可解释决策与数学分析工作台。"""
-from datetime import datetime
-from html import escape
+"""One linked customer dashboard: scatter -> profile -> economics -> service plan."""
+from dataclasses import asdict
+import hashlib
 import json
 
 import numpy as np
@@ -9,515 +9,251 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from analytics import (matrix_diagnostics, numeric_profile, optimize_allocation,
-                       principal_components, pure_nash_equilibria, zero_sum_equilibrium)
+from analytics import optimize_allocation
 from config import get_config
-from data_source import build_dataframe_data_source, MockDataSource
+from customer_scoring import (DIMENSIONS, SIGNALS, ValueScenario, composite, customer_scores,
+                              factor_inputs, fit_factors, scenario_values, selected_customer_ids)
+from dashboard_data import (activate_source, chart, csv_bytes, data_page, download_csv, hero, style)
 from main import PrudenceAPI
-from workbench_data import demo_source, read_upload, source_tables
+from workbench_data import demo_source, source_tables
 
-COLORS = ["#0f766e", "#7298c4", "#e8b768", "#b49cc8", "#e78e89"]
-LEVELS = {"ALLOW": "可通过", "RESTRICTED": "需复核", "FORBID": "已拦截", "UNKNOWN": "异常"}
-ACTIONS = {"PROACTIVE_CLOSING": "主动服务", "NURTURE_CONTENT": "内容培育",
-           "LOW_PRIORITY": "暂不打扰", "HUMAN_REVIEW_REQUIRED": "人工复核",
-           "BLOCK_AND_REPLACE": "拦截并替代", "ERROR": "决策异常"}
-NUMERIC = {"age": "年龄", "assets": "可用资产（元）", "period": "可接受期限（天）",
-           "risk_number": "风险等级（序数）", "views": "近 7 日浏览次数",
-           "calculator": "计算器使用次数", "duration": "浏览时长"}
-PAGES = ["总览", "决策分析", "多元统计", "矩阵实验室", "运筹优化", "博弈实验", "数据管理"]
+LEVELS = {"ALLOW": "可通过", "RESTRICTED": "需复核", "FORBID": "已拦截"}
+COLORS = {"可通过": "#168577", "需复核": "#d39436", "已拦截": "#c96970"}
+SYMBOLS = {"可通过": "circle", "需复核": "diamond", "已拦截": "x"}
+MODES = ["关注度 × 匹配度", "关注度 × 年度贡献", "因子 1 × 因子 2"]
+DISPLAY = {"customer_id": "客户 ID", "name": "客户", "score": "综合观察分", "engagement": "关注度",
+           "fit": "产品匹配度", "status": "适当性", "annual_contribution": "情景年度贡献（元）",
+           "coverage": "画像完整维度", "missing": "待补充指标"}
 
 
-def style():
-    st.markdown("""<style>
-    .stApp {font-family: 'Segoe UI','Microsoft YaHei',sans-serif;}
-    .block-container {max-width:1440px;padding-top:2.3rem;padding-bottom:3rem;}
-    [data-testid="stSidebar"] {background:#edf2f4;border-right:1px solid #dde5e9;}
-    [data-testid="stSidebar"] [data-testid="stRadio"] label {padding:9px 12px;margin:2px 0;border-radius:9px;}
-    [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {background:#fff;box-shadow:0 2px 6px #163a4910;}
-    h1,h2,h3 {letter-spacing:-.035em;}
-    h1 {font-weight:750!important;}
-    [data-testid="stMetric"] {background:white;border:1px solid #e2e9ec;border-radius:14px;padding:18px 20px;}
-    [data-testid="stMetricLabel"] {color:#60727c;font-size:13px;}
-    [data-testid="stMetricValue"] {font-size:1.9rem;font-weight:650;color:#193b44;}
-    [data-testid="stPlotlyChart"], [data-testid="stDataFrame"] {border-radius:12px;overflow:hidden;}
-    .hero {padding:30px 34px;border:1px solid #d3e3e2;background:linear-gradient(110deg,#e8f3ef,#f8fafb 70%);border-radius:20px;margin:8px 0 25px;}
-    .eyebrow {font-size:11px;letter-spacing:.2em;color:#0f766e;font-weight:700;margin-bottom:14px;}
-    .hero h1 {font-size:36px;margin:0 0 10px;line-height:1.25;}
-    .hero p {color:#60717a;margin:0;max-width:740px;font-size:14px;line-height:1.9;}
-    .brand {font-size:24px;font-weight:750;color:#164b49;margin-bottom:4px;}
-    .brand-sub {font-size:10px;letter-spacing:.17em;color:#60757f;margin-bottom:30px;}
-    .footer {font-size:11px;color:#798b93;border-top:1px solid #e1e7eb;padding-top:18px;margin-top:30px;}
-    .stButton button, .stDownloadButton button {border-radius:9px;}
-    @media(max-width:700px){.block-container{padding:1.2rem 1rem}.hero{padding:24px 20px}.hero h1{font-size:27px}}
-    </style>""", unsafe_allow_html=True)
+@st.cache_data(show_spinner=False)
+def factors_for(frame, n_factors):
+    return fit_factors(frame, n_factors)
 
 
-def chart(fig, height=340):
-    fig.update_layout(template="plotly_white", height=height, paper_bgcolor="white", plot_bgcolor="white",
-                      font=dict(family="Segoe UI, Microsoft YaHei", color="#405662", size=12),
-                      margin=dict(l=20, r=20, t=54, b=66), colorway=COLORS,
-                      legend=dict(orientation="h", y=-.24, x=0, title_text=""),
-                      title=dict(x=.035, y=.97, font=dict(size=15, color="#193b44")))
-    fig.update_xaxes(showgrid=False, zeroline=False)
-    fig.update_yaxes(gridcolor="#edf1f4", zeroline=False)
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+def scenario_controls(product_id, original):
+    saved = st.session_state.get("scenario_settings", {})
+    scenario = ValueScenario(**saved.get("rates", {}))
+    product = saved.get("products", {}).get(product_id, original).copy()
+    if st.session_state.get("scenario_form_product") != product_id:
+        prefixes = [f"rate_{name}" for name in ("deposit_rate", "loan_rate", "funding_rate", "wealth_return", "wealth_fee")]
+        for prefix in prefixes + ["ds", "ws", "loan", "pd", "lgd", "cost", "risk", "lock", "min"]:
+            st.session_state.pop(f"{prefix}_{product_id}", None)
+        st.session_state.scenario_form_product = product_id
+    with st.sidebar.expander("利率与理财策略", expanded=False):
+        st.caption("以下为自定义年化情景假设，不是实时银行报价。提交后全看板联动。")
+        with st.form(f"scenario_form_{product_id}"):
+            rates = {}
+            for key, label in [("deposit_rate", "存款利率（%）"), ("loan_rate", "贷款利率（%）"),
+                               ("funding_rate", "内部资金转移利率 FTP（%）"),
+                               ("wealth_return", "理财假设毛收益率（%）"), ("wealth_fee", "理财年费率（%）")]:
+                rates[key] = st.number_input(label, -100. if key == "wealth_return" else 0., 100., getattr(scenario, key) * 100,
+                                            .1, key=f"rate_{key}_{product_id}") / 100
+            rates["deposit_share"] = st.slider("存款资金占比（%）", 0, 100, round(scenario.deposit_share * 100), key=f"ds_{product_id}") / 100
+            rates["wealth_share"] = st.slider("理财资金占比（%）", 0, 100, round(scenario.wealth_share * 100), key=f"ws_{product_id}") / 100
+            rates["loan_assumption"] = st.number_input("缺少贷款余额时的假设（万元 / 人）", 0., 100000., scenario.loan_assumption / 10000, key=f"loan_{product_id}") * 10000
+            rates["default_probability"] = st.number_input("贷款年度违约概率假设（%）", 0., 100., scenario.default_probability * 100, key=f"pd_{product_id}") / 100
+            rates["loss_given_default"] = st.number_input("违约损失率假设（%）", 0., 100., scenario.loss_given_default * 100, key=f"lgd_{product_id}") / 100
+            rates["annual_cost"] = st.number_input("年度服务成本（元 / 人）", 0., 1000000., scenario.annual_cost, key=f"cost_{product_id}")
+            st.markdown("**当前理财产品条件**")
+            risk = st.selectbox("产品风险等级", [f"R{i}" for i in range(1, 6)], index=int(product["risk"][1:]) - 1, key=f"risk_{product_id}")
+            lock = st.number_input("锁定期限（天）", 0, 36500, int(product["lock"]), key=f"lock_{product_id}")
+            minimum = st.number_input("最低金额（元）", 0., 1e10, float(product["min"]), key=f"min_{product_id}")
+            if st.form_submit_button("应用利率与策略", type="primary"):
+                try:
+                    proposed = ValueScenario(**rates)
+                    proposed.validate()
+                    products = saved.get("products", {}).copy()
+                    products[product_id] = dict(original, risk=risk, lock=lock, min=minimum)
+                    st.session_state.scenario_settings = dict(rates=asdict(proposed), products=products)
+                    st.rerun()
+                except ValueError as error:
+                    st.error(str(error))
+        st.caption("仅作用于本次看板；数据源中的产品与 API 规则不被改写。存款与理财共享可用资产池，合计不能超过 100%。")
+    return scenario, product
 
 
-def hero(kicker, title, description):
-    st.markdown(f'<div class="hero"><div class="eyebrow">{escape(kicker)}</div>'
-                f'<h1>{escape(title)}</h1><p>{escape(description)}</p></div>', unsafe_allow_html=True)
-
-
-def csv_bytes(frame):
-    safe = frame.copy()
-    for column in safe.select_dtypes(include=["object", "string"]).columns:
-        safe[column] = safe[column].map(
-            lambda value: "'" + value if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")) else value)
-    return safe.to_csv(index=False).encode("utf-8-sig")
-
-
-def download_csv(frame, label, filename):
-    st.download_button(label, csv_bytes(frame), filename, "text/csv")
-
-
-def activate_source(source, label):
-    api = PrudenceAPI(get_config(), data_source=source)
-    for key in ["batch", "batch_time", "allocation", "history", "import_tables", "capacities"]:
-        st.session_state.pop(key, None)
-    st.session_state.api = api
-    st.session_state.source_label = label
-
-
-def analysis_frame(api, customers):
-    if customers.empty:
-        return pd.DataFrame(columns=list(NUMERIC))
-    result = customers.set_index("id").copy()
-    result["risk_number"] = pd.to_numeric(result.risk.str[1:], errors="coerce")
-    signals = [("views", "beh_view_cnt_7d"), ("calculator", "beh_calculator_use_cnt"), ("duration", "beh_view_duration_decay")]
-    for label, name in signals:
-        result[label] = [api.data_source.get_intent_features(cid).get(name, np.nan) for cid in result.index]
-    return result
-
-
-def risk_matrix(api):
-    matrix = api.engines["suitability"].matrix_config
-    values = [[matrix.get_cell(f"C{c}", f"R{r}") for r in range(1, 6)] for c in range(1, 6)]
-    mapping = {"ALLOW": 0, "RESTRICTED": 1, "FORBID": 2}
-    fig = go.Figure(go.Heatmap(z=[[mapping[v] for v in row] for row in values],
-        x=[f"R{i}" for i in range(1, 6)], y=[f"C{i}" for i in range(1, 6)],
-        text=[[LEVELS[v] for v in row] for row in values], texttemplate="%{text}",
-        colorscale=[[0, "#d7eee6"], [.25, "#d7eee6"], [.26, "#f6e6c6"], [.74, "#f6e6c6"], [.75, "#f4d9d7"], [1, "#f4d9d7"]],
-        zmin=0, zmax=2, showscale=False, xgap=5, ygap=5,
-        hovertemplate="客户 %{y} · 产品 %{x}<br>%{text}<extra></extra>"))
-    fig.update_layout(title="适当性基准矩阵", xaxis_title="产品风险", yaxis_title="客户承受能力")
+def scatter_figure(frame, x, y, mode):
+    fig = px.scatter(frame, x=x, y=y, color="status", symbol="status",
+        color_discrete_map=COLORS, symbol_map=SYMBOLS, custom_data=["customer_id", "name", "score", "status"],
+        category_orders={"status": list(COLORS)})
+    fig.update_traces(marker=dict(size=11, opacity=.8, line=dict(width=.7, color="white")),
+        hovertemplate="<b>%{customdata[1]}</b> · %{customdata[0]}<br>横轴 %{x:.1f} · 纵轴 %{y:.1f}<br>综合观察分 %{customdata[2]:.1f}<br>%{customdata[3]}<extra></extra>")
+    if mode != MODES[2]:
+        fig.update_xaxes(range=[-4, 104], title="关注度 / 100")
+        fig.add_vline(x=60, line_dash="dot", line_color="#c2d1d6")
+        if mode == MODES[0]:
+            fig.update_yaxes(range=[-4, 106], title="产品匹配度 / 100")
+            fig.add_hline(y=60, line_dash="dot", line_color="#c2d1d6")
+            for x0, y0, label in [(0, 102, "匹配较高 · 待了解"), (100, 102, "关注与匹配均较高"),
+                                  (0, 3, "补充需求信息"), (100, 3, "关注较高 · 检查适配")]:
+                fig.add_annotation(x=x0, y=y0, text=label, showarrow=False, xanchor="left" if x0 == 0 else "right",
+                                   font=dict(size=10, color="#7e929b"))
+        else:
+            fig.update_yaxes(title="情景年度贡献 / 元")
+            fig.add_hline(y=0, line_dash="dot", line_color="#c2d1d6")
+    else:
+        fig.add_hline(y=0, line_dash="dot", line_color="#d9e2e6")
+        fig.add_vline(x=0, line_dash="dot", line_color="#d9e2e6")
+    fig.update_layout(template="plotly_white", height=490, margin=dict(l=20, r=20, t=15, b=50),
+        paper_bgcolor="white", plot_bgcolor="white", clickmode="event+select", dragmode="pan",
+        legend=dict(orientation="h", y=-.15, title_text=""), font=dict(color="#45616a"))
+    fig.update_xaxes(gridcolor="#edf2f3", zeroline=False)
+    fig.update_yaxes(gridcolor="#edf2f3", zeroline=False)
     return fig
 
 
-def overview(api, customers, products):
-    hero("PRUDENCE / OVERVIEW", "让每一个决策，都有依据。",
-         "从客户画像出发，连接适当性规则、统计洞察与策略实验。在可解释的分析中，找到更审慎的下一步。")
-    columns = st.columns(4)
-    columns[0].metric("分析客户", f"{len(customers):,}")
-    columns[1].metric("产品池", len(products))
-    columns[2].metric("客户资产中位数", f"¥{customers.assets.median() / 10000:,.1f} 万" if not customers.empty else "—")
-    columns[3].metric("本次已分析组合", len(st.session_state.get("batch", [])))
-    st.write("")
-    left, right = st.columns([1.15, 1])
-    with left:
-        if not customers.empty:
-            counts = customers.risk.value_counts().reindex([f"C{i}" for i in range(1, 6)], fill_value=0)
-            chart(px.bar(x=counts.index, y=counts.values, title="客户风险结构", labels={"x": "风险等级", "y": "客户数"},
-                         color=counts.index, color_discrete_sequence=COLORS).update_layout(showlegend=False))
-    with right:
-        chart(risk_matrix(api))
-        st.caption("基准矩阵仅为首层规则；年龄、首次购买、资产与期限规则还会收紧结果。")
-    left, right = st.columns([1.6, 1])
-    with left:
-        if not customers.empty:
-            chart(px.scatter(customers, x="age", y="assets", color="risk", hover_name="id",
-                             title="客户画像 · 年龄与可用资产", color_discrete_sequence=COLORS,
-                             category_orders={"risk": [f"C{i}" for i in range(1, 6)]},
-                             labels={"age": "年龄", "assets": "可用资产（元）", "risk": "风险等级"}))
-    with right:
-        st.subheader("分析路径")
-        for number, title, detail in [("01", "先看数据", "观察分布、相关性与主成分。"),
-                                      ("02", "再做决策", "检查适当性，展开意图得分与原因。"),
-                                      ("03", "策略实验", "在预算与容量约束下优化服务资源。")]:
-            st.markdown(f"**{number} · {title}**")
-            st.caption(detail)
-        st.info("意图模型为原型。合成训练数据和情景收益不代表真实转化概率或投资回报。")
+def radar_figure(row, cohort):
+    labels = DIMENSIONS + [DIMENSIONS[0]]
+    fig = go.Figure()
+    median = cohort[DIMENSIONS].median()
+    fig.add_trace(go.Scatterpolar(r=median.tolist() + [median.iloc[0]], theta=labels, name="筛选群体中位数",
+                                 line=dict(color="#9faeb7", dash="dot"), hovertemplate="%{theta} %{r:.1f}<extra></extra>"))
+    values = row[DIMENSIONS].tolist()
+    fig.add_trace(go.Scatterpolar(r=values + [values[0]], theta=labels, name="当前客户",
+        fill="toself" if np.isfinite(values).all() else None, fillcolor="rgba(22,133,119,.15)",
+        line=dict(color="#168577", width=2.5), mode="lines+markers", connectgaps=False,
+        hovertemplate="%{theta} %{r:.1f}<extra></extra>"))
+    fig.update_layout(template="plotly_white", height=340, margin=dict(l=58, r=58, t=25, b=40),
+        polar=dict(radialaxis=dict(range=[0, 100], tickvals=[25, 50, 75, 100], tickfont=dict(size=9)),
+                   angularaxis=dict(tickfont=dict(size=11)), bgcolor="white"),
+        legend=dict(orientation="h", y=-.2, x=.1), font=dict(color="#45616a"), paper_bgcolor="white")
+    return fig
 
 
-def decision_page(api, customers, products):
-    hero("01 / DECISION INTELLIGENCE", "把决策过程，展开来看。", "先判断适当性，再观察意图信号。支持单个组合与最多 100 个组合的批量对比。")
-    if customers.empty or products.empty:
-        st.info("请在数据管理中导入客户表和产品表后继续。")
-        return
-    with st.form("decision_form"):
-        left, right = st.columns(2)
-        selected_c = left.multiselect("客户", customers.id.tolist(), default=customers.id.head(6).tolist())
-        selected_p = right.multiselect("产品", products.id.tolist(), default=products.id.tolist(),
-                                       format_func=lambda pid: f"{pid} · {api.get_product(pid).get('name', '')}")
-        st.caption("客户数 × 产品数 ≤ 100。禁止组合不会计算意图分，其分数在分析中显示为空。")
-        run = st.form_submit_button("运行决策分析", type="primary")
-    if run:
-        if not selected_c or not selected_p or len(selected_c) * len(selected_p) > 100:
-            st.error("请至少选择 1 位客户和 1 个产品，并将总组合数控制在 100 以内。")
-        else:
-            with st.spinner("正在逐项检查适当性与意图…"):
-                results = api.batch_decide([{"customer_id": c, "product_id": p} for c in selected_c for p in selected_p])
-            st.session_state.batch = results
-            st.session_state.batch_time = datetime.now().isoformat(timespec="seconds")
-            st.session_state.pop("allocation", None)
-            history = st.session_state.get("history", [])
-            history.append({"time": st.session_state.batch_time, "results": results})
-            st.session_state.history = history[-10:]
-    results = st.session_state.get("batch", [])
-    if not results:
-        st.info("选好分析范围后运行，结果会保留在当前会话，并可用于运筹优化。")
-        return
-    st.caption(f"结果快照 · {st.session_state.get('batch_time', '')} · {len(results)} 个组合（修改选择后需重新运行）")
-    df = pd.DataFrame(results)
-    for score in ["intent_score", "rule_score", "model_score"]:
-        if score not in df:
-            df[score] = np.nan
-        df.loc[df.suitability_level.isin(["FORBID", "UNKNOWN"]), score] = np.nan
-    cols = st.columns(4)
-    for col, level in zip(cols[:3], ["ALLOW", "RESTRICTED", "FORBID"]):
-        col.metric(LEVELS[level], int(df.suitability_level.eq(level).sum()))
-    cols[3].metric("异常组合", int(df.action.eq("ERROR").sum()))
-    chart_tab, detail_tab, report_tab = st.tabs(["可视分析", "决策明细", "报告与历史"])
-    with chart_tab:
-        left, right = st.columns(2)
-        with left:
-            counts = df.suitability_level.map(LEVELS).value_counts()
-            chart(px.pie(names=counts.index, values=counts.values, hole=.7, title="适当性分布", color=counts.index,
-                         color_discrete_map={"可通过": COLORS[0], "需复核": COLORS[2], "已拦截": COLORS[4], "异常": "#87929b"}))
-        with right:
-            chart(px.scatter(df.dropna(subset=["rule_score", "model_score"]), x="rule_score", y="model_score",
-                             color="suitability_level", hover_data=["customer_id", "product_id"], title="规则分 × 模型分",
-                             range_x=[0, 1], range_y=[0, 1], color_discrete_sequence=COLORS,
-                             labels={"rule_score": "规则分", "model_score": "模型分", "suitability_level": "适当性"}))
-        pivot = df.pivot(index="customer_id", columns="product_id", values="intent_score")
-        chart(px.imshow(pivot, text_auto=".2f", zmin=0, zmax=1, color_continuous_scale="Teal", aspect="auto",
-                        title="客户 × 产品意图分", labels={"color": "意图分"}), min(640, max(300, len(pivot) * 28)))
-        st.caption("空白表示未计算。同一客户在不同产品上的分数可能相同，因为当前模型主要使用客户行为特征。")
-    with detail_tab:
-        display = df[["customer_id", "product_id", "suitability_level", "action", "intent_score", "rule_score", "model_score", "reason"]]
-        st.dataframe(display, use_container_width=True, hide_index=True, column_config={
-            "customer_id": "客户", "product_id": "产品", "suitability_level": "适当性",
-            "action": "动作", "intent_score": st.column_config.NumberColumn("意图分", format="%.3f"),
-            "rule_score": st.column_config.NumberColumn("规则分", format="%.3f"),
-            "model_score": st.column_config.NumberColumn("模型分", format="%.3f"), "reason": "原因"})
-        selected = st.selectbox("展开组合", range(len(results)),
-                                format_func=lambda i: f"{results[i]['customer_id']} → {results[i]['product_id']}")
-        record = results[selected]
-        st.info(f"{ACTIONS.get(record['action'], record['action'])} · {record.get('reason', '')}")
-        left, right = st.columns(2)
-        left.json(api.get_customer(record["customer_id"]), expanded=True)
-        right.json(api.get_product(record["product_id"]), expanded=True)
-        signals = record.get("top_signals", [])
-        if signals:
-            chart(px.bar(pd.DataFrame(signals), x="shap_value", y="feature", orientation="h", title="主要 SHAP 信号（模型贡献）"), 250)
-            st.caption("SHAP 描述模型贡献，不能解释因果。")
-        else:
-            st.caption("该组合没有可用的 SHAP 解释。禁止组合不会进入意图评分。")
-        if record.get("replacement_products"):
-            st.write("替代候选产品（仍需逐项运行适当性检查）")
-            st.dataframe(pd.DataFrame(record["replacement_products"]), hide_index=True)
-    with report_tab:
-        report_frame = df.drop(columns=["top_signals", "replacement_products"], errors="ignore")
-        download_csv(report_frame, "下载决策 CSV", "prudence_decisions.csv")
-        payload = {"source": st.session_state.source_label, "generated_at": st.session_state.batch_time,
-                   "note": "原型决策；FORBID/ERROR 分数为未计算。", "results": json.loads(df.to_json(orient="records", force_ascii=False))}
-        st.download_button("下载完整 JSON", json.dumps(payload, ensure_ascii=False, indent=2), "prudence_report.json", "application/json")
-        html = "<!doctype html><html lang='zh-CN'><meta charset='utf-8'><title>睿衡分析报告</title>"
-        html += "<style>body{font-family:sans-serif;margin:40px;color:#193b44}table{border-collapse:collapse;font-size:12px}td,th{padding:8px;border:1px solid #dde5e9}</style>"
-        html += f"<h1>睿衡 · 决策报告</h1><p>{escape(st.session_state.source_label)} · {escape(st.session_state.batch_time)}</p>"
-        html += "<p>教学原型；模拟数据不代表实际业务表现。空分数代表未计算。</p>"
-        html += report_frame.to_html(index=False, escape=True, na_rep="未计算") + "</html>"
-        st.download_button("下载 HTML 报告", html, "prudence_report.html", "text/html")
-        history = st.session_state.get("history", [])
-        if history:
-            index = st.selectbox("本会话最近 10 次分析", range(len(history)), format_func=lambda i: f"{history[i]['time']} · {len(history[i]['results'])} 个组合")
-            if st.button("恢复此分析快照"):
-                st.session_state.batch = history[index]["results"]
-                st.session_state.batch_time = history[index]["time"]
-                st.session_state.pop("allocation", None)
-                st.rerun()
+def manual_focus_changed():
+    st.session_state.selection_nonce = st.session_state.get("selection_nonce", 0) + 1
 
 
-def statistics_page(api, customers):
-    hero("02 / MULTIVARIATE ANALYSIS", "从多个维度，理解客户。", "以一位客户为一条观测，探索变量分布与相关性，再用标准化 PCA 压缩信息。")
-    frame = analysis_frame(api, customers)
-    fields = st.multiselect("分析字段", list(NUMERIC), default=list(NUMERIC)[:5], format_func=NUMERIC.get)
-    if not fields or frame.empty:
-        st.info("请准备客户数据，并至少选择一个字段。")
-        return
-    numeric, summary = numeric_profile(frame[fields].rename(columns=NUMERIC))
-    cols = st.columns(3)
-    cols[0].metric("客户样本量", len(numeric))
-    cols[1].metric("完整样本", len(numeric.dropna()))
-    cols[2].metric("缺失 / 无效单元格", int(numeric.isna().sum().sum()))
-    if len(numeric) < 20:
-        st.warning("当前样本较少，图表只用于描述这组样本，不宜推广为总体结论。")
-    distribution, correlation, pca = st.tabs(["分布与质量", "相关性", "PCA 主成分"])
-    with distribution:
-        selected = st.selectbox("观察变量", numeric.columns)
-        left, right = st.columns(2)
-        with left:
-            chart(px.histogram(numeric, x=selected, nbins=20, title="样本分布", color_discrete_sequence=COLORS))
-        with right:
-            chart(px.box(numeric, y=selected, points="outliers", title="中位数、四分位数与异常点", color_discrete_sequence=COLORS))
-        st.dataframe(summary, use_container_width=True, column_config={
-            "count": "有效数", "mean": "均值", "std": "标准差", "min": "最小值", "max": "最大值",
-            "missing": "缺失数", "missing_rate": st.column_config.NumberColumn("缺失率", format="%.2f")})
-        download_csv(summary.reset_index(names="字段"), "下载描述统计", "descriptive_statistics.csv")
-    with correlation:
-        method = st.radio("相关系数", ["spearman", "pearson"], horizontal=True,
-                          format_func=lambda m: "Spearman 秩相关" if m == "spearman" else "Pearson 线性相关")
-        chart(px.imshow(numeric.corr(method=method, min_periods=3), text_auto=".2f", zmin=-1, zmax=1,
-                        color_continuous_scale="Tealrose", title="相关矩阵 · 成对完整样本"), 430)
-        with st.expander("查看每对变量实际使用的样本数"):
-            present = numeric.notna().astype(int)
-            st.dataframe(present.T @ present, use_container_width=True)
-        st.caption("风险等级属于序数变量，优先查看秩相关。常量列或样本不足的系数留空；相关不代表因果。")
-    with pca:
-        try:
-            result = principal_components(numeric)
-        except ValueError as error:
-            st.info(str(error))
-            return
-        st.caption(f"标准化：减均值 / 样本标准差 · 排除 {result['dropped_rows']} 行缺失样本 · 去除常量字段：{', '.join(result['constant_columns']) or '无'}")
-        variance = result["variance_ratio"]
-        left, right = st.columns(2)
-        with left:
-            fig = go.Figure(go.Bar(x=variance.index, y=variance, name="单项解释率", marker_color=COLORS[0]))
-            fig.add_scatter(x=variance.index, y=variance.cumsum(), name="累计解释率", mode="lines+markers", line_color=COLORS[2])
-            fig.update_layout(title="主成分解释方差", yaxis=dict(tickformat=".0%", range=[0, 1.05]))
-            chart(fig)
-        with right:
-            scores = result["scores"].copy()
-            scores["risk"] = frame.loc[scores.index, "risk"]
-            scores["客户"] = scores.index
-            chart(px.scatter(scores, x="PC1", y="PC2", color="risk", hover_name="客户", color_discrete_sequence=COLORS,
-                             title=f"二维投影 · 保留 {variance.iloc[:2].sum():.1%} 的样本方差", labels={"risk": "客户风险"}))
-        chart(px.imshow(result["loadings"].iloc[:, :min(4, len(variance))], text_auto=".2f", color_continuous_scale="Tealrose",
-                        zmin=-1, zmax=1, aspect="auto", title="载荷矩阵 · 变量与主成分的相关程度"), 360)
-        st.caption("PCA 使用完整样本与样本标准差，通过 SVD 计算。载荷 = 特征向量 × 特征值平方根；方向正负无优劣，二维投影不是客户评级。")
-        download_csv(result["scores"].reset_index(), "下载主成分得分", "pca_scores.csv")
-
-
-def matrix_page(api, customers):
-    hero("03 / LINEAR ALGEBRA", "看见矩阵背后的结构。", "检查秩、零空间维数与条件数；通过奇异值分解，观察低秩近似保留了多少信息。")
-    mode = st.radio("矩阵来源", ["客户标准化特征", "自定义矩阵"], horizontal=True)
-    if mode == "客户标准化特征":
-        try:
-            result = principal_components(analysis_frame(api, customers)[["age", "assets", "period", "risk_number"]])
-            a = result["standardized"].to_numpy()
-        except ValueError as error:
-            st.info(str(error))
-            return
-        st.caption(f"{a.shape[0]} 位客户 × {a.shape[1]} 个字段；已使用样本标准差标准化。")
+def profile_panel(frame, scenario):
+    ids = frame.customer_id.tolist()
+    cid = st.selectbox("当前客户画像", ids, key="focus_customer", on_change=manual_focus_changed,
+                       format_func=lambda c: f"{frame.loc[c].get('name', c)} · {c}")
+    row = frame.loc[cid]
+    st.caption(f"{row.status} · {row['risk']} · {row['age']} 岁 · 可用资产 ¥{row.assets:,.0f}")
+    st.plotly_chart(radar_figure(row, frame), use_container_width=True, key="customer_radar", config={"displaylogo": False})
+    a, b = st.columns(2)
+    a.metric("综合观察分", f"{row.score:.1f}" if pd.notna(row.score) else "待补数据")
+    b.metric("情景年度贡献", f"¥{row.annual_contribution:,.0f}")
+    if row.suitability_level == "FORBID":
+        st.error("当前理财产品已拦截；不进入服务分配。" + str(row.reason))
+    elif row.suitability_level == "RESTRICTED":
+        st.warning("当前理财产品需人工复核；不进入服务分配。" + str(row.reason))
     else:
-        text = st.text_area("每行一组数字，以空格或逗号分隔（最多 20 × 20）", "3, 1, 0\n1, 3, 0\n0, 0, 1", height=120)
-        try:
-            a = np.array([[float(value) for value in line.replace(",", " ").split()] for line in text.strip().splitlines()])
-            if a.ndim != 2 or 0 in a.shape or max(a.shape) > 20:
-                raise ValueError()
-        except ValueError:
-            st.error("请填写每行长度相同的数值矩阵，维度不超过 20 × 20。")
-            return
-    k = st.select_slider("近似阶数 k", options=list(range(1, min(a.shape) + 1)))
-    try:
-        result = matrix_diagnostics(a, k)
-    except ValueError as error:
-        st.error(str(error))
-        return
-    cols = st.columns(4)
-    cols[0].metric("矩阵秩", result["rank"])
-    cols[1].metric("零空间维数", result["nullity"])
-    cols[2].metric("条件数 κ₂", f"{result['condition']:,.2f}" if np.isfinite(result["condition"]) else "∞")
-    cols[3].metric("相对重建误差", f"{result['relative_error']:.2%}")
-    left, right = st.columns(2)
-    with left:
-        chart(px.bar(x=[f"σ{i+1}" for i in range(len(result["singular_values"]))], y=result["singular_values"], title="奇异值谱"))
-    with right:
-        chart(px.line(x=list(range(1, len(result["energy"]) + 1)), y=result["energy"], markers=True,
-                      title="累计能量保留", labels={"x": "近似阶数", "y": "保留比例"}).update_yaxes(tickformat=".0%"))
-    st.latex(r"A = U\Sigma V^T,\quad A_k = U_k\Sigma_k V_k^T,\quad \epsilon_k=\frac{\|A-A_k\|_F}{\|A\|_F}")
-    if not np.isfinite(result["condition"]) or result["condition"] > 1e8:
-        st.warning("矩阵秩亏或条件数很高，直接求逆可能不稳定；分析采用 SVD，未强行求逆。")
-    if result["eigenvalues"] is not None:
-        st.write("对称矩阵特征值", result["eigenvalues"].tolist())
-    with st.expander("查看近似矩阵（前 50 行）"):
-        st.dataframe(result["reconstructed"][:50], use_container_width=True)
-    download_csv(pd.DataFrame(result["reconstructed"]), "下载近似矩阵", "matrix_approximation.csv")
+        st.caption("当前规则可通过。下一步：核实客户需求、资金安排与服务意愿。")
+    if row.missing:
+        st.caption("待补充：" + row.missing + "。雷达图留空，不记作零分。")
+    return row
 
 
-def optimization_page():
-    hero("04 / OPERATIONS RESEARCH", "把有限资源，用在合适的组合上。", "使用 0–1 整数规划，在服务预算、触达人数和产品容量的约束下，最大化情景效用分。")
-    results = st.session_state.get("batch", [])
-    if not results:
-        st.info("先到「决策分析」运行一组客户与产品，适当性结果会成为此处的硬约束。")
-        return
-    base = pd.DataFrame(results)
-    allowed = base.loc[base.suitability_level.eq("ALLOW")]
-    st.info(f"当前 {len(base)} 个组合中，仅 {len(allowed)} 个 ALLOW 组合可分配。RESTRICTED、FORBID 与异常组合全部排除；每位客户最多 1 个产品。")
-    if allowed.empty:
-        return
-    a, b, c = st.columns(3)
-    budget = a.number_input("总服务预算（成本单位）", min_value=0.0, value=120.0, step=10.0)
-    contacts = b.number_input("最多触达客户数", min_value=0, max_value=100, value=min(6, allowed.customer_id.nunique()))
-    unit_cost = c.number_input("每次服务成本（成本单位）", min_value=0.0, value=20.0, step=1.0)
-    capacities = pd.DataFrame({"产品": sorted(allowed.product_id.unique()), "容量": 3})
-    edited = st.data_editor(capacities, disabled=["产品"], hide_index=True, use_container_width=True,
-                            column_config={"容量": st.column_config.NumberColumn(min_value=0, max_value=100, step=1)}, key="capacities")
-    st.caption("情景效用默认取意图分 × 100，只表示模型排序偏好；服务成本由用户设定，不是产品购买金额。")
-    candidates = base[["customer_id", "product_id", "suitability_level", "intent_score"]].copy()
-    candidates["utility"] = candidates.intent_score * 100
-    candidates["cost"] = unit_cost
-    signature = (st.session_state.batch_time, float(budget), int(contacts), float(unit_cost), edited.to_json())
-    if st.button("求解最优分配", type="primary"):
-        try:
-            capacities_map = dict(zip(edited["产品"], edited["容量"]))
-            result = optimize_allocation(candidates, budget, contacts, capacities_map)
-            curve = []
-            for limit in sorted(set([0, budget * .25, budget * .5, budget * .75, budget, budget * 1.25])):
-                point = optimize_allocation(candidates, limit, contacts, capacities_map)
-                curve.append({"服务预算": limit, "最优情景效用": point.objective, "分配人数": len(point.selected)})
-            st.session_state.allocation = (signature, result, pd.DataFrame(curve))
-        except (ValueError, TypeError) as error:
-            st.error(str(error))
-    saved = st.session_state.get("allocation")
-    if saved and saved[0] != signature:
-        st.info("参数已改变，请重新求解以更新结果。")
-    elif saved:
-        _, result, curve = saved
+def profile_details(row, scenario):
+    with st.expander("所选客户 · 评分依据与贡献拆解", expanded=False):
+        a, b = st.columns([1, 1.3])
+        with a:
+            st.dataframe(pd.DataFrame({"维度": DIMENSIONS, "得分 / 100": row[DIMENSIONS].values}), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame({"原始行为指标": list(SIGNALS.values()), "观测值": [row.signals[k] for k in SIGNALS]}), hide_index=True, use_container_width=True)
+        with b:
+            values = [row.deposit_contribution, row.loan_contribution, row.wealth_contribution,
+                      -row.expected_loss, -scenario.annual_cost, row.annual_contribution]
+            chart(go.Figure(go.Waterfall(x=["存款利差", "贷款利差", "理财费用", "预期损失", "服务成本", "年度贡献"],
+                y=values, measure=["relative"] * 5 + ["total"], text=[f"¥{v:,.0f}" for v in values],
+                textposition="outside", increasing=dict(marker=dict(color="#168577")),
+                decreasing=dict(marker=dict(color="#c96970")), totals=dict(marker=dict(color="#355a70")))).update_layout(title="同一客户的年度贡献情景"))
+            st.caption(f"存款配置 ¥{row.deposit_balance:,.0f} · 理财配置 ¥{row.wealth_balance:,.0f} · 未配置 ¥{row.unallocated:,.0f}。")
+            st.caption(f"贷款余额 ¥{row.loan_balance:,.0f}（{'情景假设' if row.loan_is_assumed else '导入记录'}）；客户年度利息与理财净收支情景 ¥{row.customer_annual_cashflow:,.0f}。")
+            st.caption("客户收支 = 存款利息 + 理财假设毛收益 − 理财费用 − 贷款利息；不含本金、税费、净值波动。年度贡献为机构口径，非客户收益。")
+
+
+def structural_analysis(factors, factor_error, frame, row, alpha):
+    st.caption("因子模型始终使用当前数据源全体完整客户，筛选不会重新拟合；主图切换到因子视图仍可点击查看同一客户。")
+    if factors is None:
+        st.info(factor_error)
+    else:
         a, b, c = st.columns(3)
-        a.metric("最优情景效用", f"{result.objective:.2f}")
-        b.metric("已分配客户", len(result.selected))
-        c.metric("预算使用", f"{result.cost:.0f} / {budget:.0f}")
-        st.dataframe(result.selected, hide_index=True, use_container_width=True)
-        if result.selected.empty:
-            st.info("当前约束下空方案最优：预算、容量或效用不足，未分配任何组合。")
-        chart(px.line(curve, x="服务预算", y="最优情景效用", markers=True, title="预算敏感性 · 其余约束保持不变"))
-        download_csv(result.selected, "下载分配方案", "allocation.csv")
-    with st.expander("模型定义"):
-        st.latex(r"\max\sum_{i,j}u_{ij}x_{ij}\quad s.t.\quad \sum_j x_{ij}\leq1,\ \sum_i x_{ij}\leq K_j,\ \sum_{i,j}c_{ij}x_{ij}\leq B,\ \sum_{i,j}x_{ij}\leq N")
-        st.caption("x 为 0/1；非 ALLOW 组合固定为 0。使用 HiGHS 整数规划求解，仅在求解器确认最优时展示方案。")
-
-
-def game_page():
-    hero("05 / GAME THEORY", "在策略互动中，理解均衡。", "编辑收益矩阵，观察双方最佳回应。这里的收益是人为设定的实验分值，与理财产品回报无关。")
-    mode = st.radio("实验类型", ["零和博弈 · 混合策略", "双矩阵博弈 · 纯策略 Nash"], horizontal=True)
-    if mode.startswith("零和"):
-        preset = st.selectbox("示例", ["策略轮换（石头剪刀布）", "匹配硬币", "存在鞍点"])
-        matrices = {"策略轮换（石头剪刀布）": [[0, -1, 1], [1, 0, -1], [-1, 1, 0]],
-                    "匹配硬币": [[1, -1], [-1, 1]], "存在鞍点": [[3, 1], [4, 2]]}
-        values = matrices[preset]
-        frame = pd.DataFrame(values, index=[f"行策略 {i+1}" for i in range(len(values))], columns=[f"列策略 {i+1}" for i in range(len(values[0]))], dtype=float)
-        a = st.data_editor(frame, key=f"zero_{preset}", use_container_width=True)
-        st.caption("表中为行玩家收益 A，列玩家收益为 −A；行玩家最大化，列玩家最小化。")
-        try:
-            result = zero_sum_equilibrium(a)
-        except ValueError as error:
-            st.error(str(error))
-            return
-        columns = st.columns(3)
-        columns[0].metric("均衡博弈值", f"{result['value']:.4f}")
-        columns[1].metric("纯策略保底收益", f"{result['pure_maximin']:.4f}")
-        columns[2].metric("对偶间隙", f"{result['duality_gap']:.2e}")
-        left, right = st.columns(2)
+        a.metric("因子分析有效样本", factors["n"])
+        b.metric("协方差重建相对误差", f"{factors['residual']:.1%}")
+        c.metric("相关矩阵条件数", f"{factors['condition']:.1f}")
+        left, right = st.columns([1.3, 1])
         with left:
-            chart(px.bar(x=a.index, y=result["row_strategy"], title="行玩家 · 最优混合策略", labels={"x": "策略", "y": "概率"}).update_yaxes(range=[0, 1], tickformat=".0%"))
+            chart(px.imshow(factors["loadings"], text_auto=".2f", zmin=-1, zmax=1, color_continuous_scale="BrBG", title="旋转因子载荷 · 特征如何共同变化"), 390)
         with right:
-            chart(px.bar(x=a.columns, y=result["column_strategy"], title="列玩家 · 最优混合策略", labels={"x": "策略", "y": "概率"}).update_yaxes(range=[0, 1], tickformat=".0%"))
-        st.latex(r"\max_{p\in\Delta_m}\min_j(p^T A)_j = \min_{q\in\Delta_n}\max_i(Aq)_i")
-        st.caption("求解双方线性规划，并用最佳回应收益差检验结果。均衡可能不唯一，这里展示其中一组。")
+            for name in factors["loadings"]:
+                strongest = factors["loadings"][name].abs().nlargest(2).index
+                st.write(f"**{name}** · 主要关联：{'、'.join(strongest)}")
+                if row.customer_id in factors["scores"].index:
+                    st.caption(f"当前客户因子得分：{factors['scores'].loc[row.customer_id, name]:.2f}")
+            st.dataframe(pd.DataFrame({"共同度": factors["communalities"], "独特方差": factors["uniqueness"]}).round(3), use_container_width=True)
+        st.caption(f"完整案例删除 {factors['dropped_rows']} 位；常量列排除：{'、'.join(factors['dropped_columns']) or '无'}。采用标准化、最大似然因子分析与 Varimax 旋转。因子符号和次序不代表优劣，也不证明因果或预测能力。")
+        if factors["condition"] > 1000:
+            st.warning("变量高度共线，因子结构可能不稳定，应补充样本并复核变量选择。")
+    st.markdown("**权重敏感性 · 所选客户在当前群体中的名次**")
+    sensitivity = []
+    for weight in np.arange(.1, 1., .1):
+        scores = composite(frame.engagement, frame.fit, weight)
+        ranks = scores.rank(method="min", ascending=False)
+        sensitivity.append({"关注度权重": round(weight * 100), "名次": ranks.loc[row.customer_id], "观察分": scores.loc[row.customer_id]})
+    sensitivity = pd.DataFrame(sensitivity)
+    if sensitivity["名次"].notna().any():
+        fig = px.line(sensitivity, x="关注度权重", y="名次", markers=True)
+        fig.update_yaxes(autorange="reversed", dtick=1 if len(frame) < 15 else None)
+        fig.add_vline(x=alpha * 100, line_dash="dot", line_color="#168577")
+        chart(fig, 250)
+        st.caption("其余条件固定，观察分 = 100 × (关注度 / 100)^权重 × (匹配度 / 100)^(1−权重)。并列使用最小名次；名次随筛选群体变化。")
     else:
-        left, right = st.columns(2)
-        with left:
-            st.write("行玩家收益")
-            a = st.data_editor(pd.DataFrame([[3., 0.], [5., 1.]], index=["合作", "背离"], columns=["合作", "背离"]), key="nash_a")
-        with right:
-            st.write("列玩家收益")
-            b = st.data_editor(pd.DataFrame([[3., 5.], [0., 1.]], index=["合作", "背离"], columns=["合作", "背离"]), key="nash_b")
+        st.info("所选客户数据不完整，暂不计算名次敏感性。")
+
+
+def service_plan(frame, product_id, selection, scenario_context):
+    st.caption("把同一看板中的客户转为本次服务候选。仅纳入数据完整、适当性可通过且有正向目标效用的客户。此处只生成计划。")
+    a, b, c, d = st.columns(4)
+    target = a.selectbox("分配目标", ["综合观察分", "情景年度贡献"], key="allocation_target")
+    budget = b.number_input("本次触达预算（元）", 0., 1e8, 1000., key="allocation_budget")
+    cost = c.number_input("每次触达成本（元）", 1., 1e6, 50., key="contact_cost")
+    limit = d.number_input("本次最多触达人数", 0, 2000, 10, key="contact_limit")
+    only = st.checkbox(f"只使用图中圈选客户（{len(selection)} 位）", value=False, key="selected_only")
+    pool = frame.loc[frame.customer_id.isin(selection)] if only else frame
+    utility = "score" if target == "综合观察分" else "annual_contribution"
+    pool = pool.loc[pool.score.notna() & pool.suitability_level.eq("ALLOW") & pool[utility].gt(0)].copy()
+    candidates = pd.DataFrame({"customer_id": pool.customer_id, "product_id": product_id,
+        "suitability_level": pool.suitability_level, "utility": pool[utility], "cost": cost})
+    signature = hashlib.sha256((candidates.to_json() + str((budget, cost, limit, target)) + scenario_context).encode()).hexdigest()
+    if st.button("生成服务计划", type="primary"):
         try:
-            equilibria = pure_nash_equilibria(a, b)
+            result = optimize_allocation(candidates, budget, int(limit), {product_id: int(limit)})
+            st.session_state.allocation = (signature, result)
         except ValueError as error:
             st.error(str(error))
-            return
-        if equilibria:
-            st.success("纯策略 Nash 均衡：" + "；".join(f"行玩家 {a.index[i]} / 列玩家 {a.columns[j]}（收益 {a.iloc[i,j]:g}, {b.iloc[i,j]:g}）" for i, j in equilibria))
-        else:
-            st.info("不存在纯策略 Nash 均衡；这不代表不存在混合策略均衡。本模式未求解一般双矩阵混合均衡。")
-        st.caption("纯策略 Nash：另一方策略固定时，任一方单独改变策略都不能获得更高收益。共同利益最高的方案未必是均衡。")
+    previous = st.session_state.get("allocation")
+    if previous and previous[0] != signature:
+        st.info("候选或参数已改变，请重新生成服务计划。")
+    elif previous:
+        result = previous[1]
+        st.success(f"计划服务 {len(result.selected)} 位 · 本次成本 ¥{result.cost:,.0f} · 目标效用合计 {result.objective:,.1f}")
+        chosen = pool.loc[pool.customer_id.isin(result.selected.customer_id)]
+        output = chosen[list(DISPLAY)].rename(columns=DISPLAY)
+        st.dataframe(output, hide_index=True, use_container_width=True)
+        download_csv(output, "下载服务计划", "customer_service_plan.csv")
+    st.caption("采用 0–1 整数规划，每位客户最多一次。本次触达成本与年度服务成本是独立假设；情景年度贡献是存量规模指标，不能解释为此次触达带来的增量利润。")
 
 
-def data_page(api, customers, products):
-    hero("06 / DATA WORKSPACE", "可信分析，从清楚的数据开始。", "支持 CSV、Excel 和 JSON。先解析、检查并预览，再明确应用；更换数据源后会清除旧分析快照。")
-    left, right = st.columns(2)
-    if left.button("加载 120 位模拟客户", use_container_width=True):
-        activate_source(demo_source(), "模拟数据 · 120 位客户 · seed 42")
-        st.rerun()
-    if right.button("恢复原版 3 位演示客户", use_container_width=True):
-        activate_source(MockDataSource(), "模拟数据 · 原版 3 位客户")
-        st.rerun()
-    st.caption("模拟样本由固定随机种子生成，便于复现。数据不会自动写入数据库。")
-    with st.form("upload_form"):
-        uploaded = st.file_uploader("导入文件", type=["csv", "xlsx", "json"])
-        submitted = st.form_submit_button("解析并预览")
-    if submitted:
-        if uploaded is None:
-            st.warning("请先选择文件。")
-        else:
-            try:
-                parsed = read_upload(uploaded.name, uploaded.getvalue())
-                staged = st.session_state.get("import_tables", {}).copy()
-                staged.update(parsed)
-                st.session_state.import_tables = staged
-                st.success("已加入待导入区，可继续上传其他表。尚未更换当前数据源。")
-            except (ValueError, KeyError, TypeError, UnicodeError, OSError) as error:
-                st.error(f"导入失败：{error}")
-    staged = st.session_state.get("import_tables", {})
-    if staged:
-        for name, frame in staged.items():
-            st.write(f"待导入 · {name} · {len(frame)} 行")
-            st.dataframe(frame.head(10), hide_index=True, use_container_width=True)
-        a, b = st.columns(2)
-        if a.button("应用待导入数据", type="primary"):
-            try:
-                if any(key not in staged or staged[key].empty for key in ["customers", "products"]):
-                    raise ValueError("请先上传非空客户表和产品表。可以分次上传 CSV，或一次上传完整 JSON / Excel。")
-                source = build_dataframe_data_source(staged["customers"], staged["products"], staged.get("intent_features"))
-                activate_source(source, "用户导入数据")
-                st.rerun()
-            except ValueError as error:
-                st.error(str(error))
-        if b.button("清空待导入区"):
-            st.session_state.pop("import_tables", None)
-            st.rerun()
-    with st.expander("当前客户与产品"):
-        st.dataframe(customers, hide_index=True, use_container_width=True)
-        st.dataframe(products, hide_index=True, use_container_width=True)
-    sample = demo_source(size=5)
-    sample_c, sample_p = source_tables(sample)
-    payload = {"customers": sample_c.to_dict("records"), "products": sample_p.to_dict("records"),
-               "intent_features": [{"customer_id": cid, "feature_name": name, "feature_value": value}
-                                   for cid in sample.list_customers() for name, value in sample.get_intent_features(cid).items()]}
-    st.download_button("下载完整 JSON 示例", json.dumps(payload, ensure_ascii=False, indent=2), "prudence_sample.json", "application/json")
-    with st.expander("字段说明与计算口径"):
-        st.markdown("客户：`id, risk, age, assets, period, first_buy`。产品：`id, risk, name, lock, min`。意图：`customer_id, feature_name, feature_value`。")
-        st.markdown("风险等级为 C1–C5 / R1–R5；金额和期限不能为负；标识不能重复。`false` 按布尔假解析。缺失意图特征按 0 补齐用于模型计算；统计仍将未提供的行为值显示为缺失。")
-        st.markdown("统计以客户为独立观测，避免将同一客户的多个产品重复当成样本。PCA 使用完整样本；所有分数、效用和博弈结果都应按各自口径解释。")
+def methodology(scenario, product, alpha):
+    st.markdown("**分数回答『有哪些观察信号』，价值情景回答『在这些假设下贡献多少』。**")
+    st.markdown("六维均为 0–100：活跃度组合浏览次数与购买间隔；投入组合计算器与比较次数；响应组合打开率、顾问联系与话术接受；另三维为当前产品的风险、资金和期限匹配。具体阈值是本项目的可解释工程约定，尚未经真实转化标签校准。")
+    st.markdown("关注度为前三维均值，匹配度为后三维均值。综合观察分采用加权几何平均，任一维缺失则不生成综合分。散点参考线 60 是阅读辅助线，不是统计显著阈值。风险适配序数比值只作展示，最终适当性始终由原有硬规则决定。")
+    st.markdown("**年度贡献（元）** = 存款金额 × (FTP − 存款利率) + 贷款余额 × (贷款利率 − FTP) + 理财配置 × 年费率 − 贷款余额 × 违约概率 × 违约损失率 − 年度服务成本。")
+    st.markdown("金额按固定余额、持有一整年计算；不含税、资本占用、期限匹配的流动性溢价、违约后利息修正和未来留存。理财收益率影响客户收支，理财费率影响机构费用收入；二者分别计算。适当性金额规则按起投额与计划理财金额的较大者重新检查。被拦截、待复核或未达起投金额的理财配置为零，资金保留为未配置，不自动转投。")
+    st.markdown("**研究与实现参考**")
+    st.markdown("- [llm_benchmark](https://github.com/llm2014/llm_benchmark)：学习同一筛选集驱动散点与榜单、轴含义清晰的组织方式；客户画像与评分在本项目独立实现。\n- [Shneiderman, 1996 · The Eyes Have It](https://hci.stanford.edu/courses/cs448b/papers/shneiderman96eyes.pdf)：全局总览、筛选及按需查看明细，落地为点选客户雷达。\n- [Aliyev 等, 2020 · 银行客户 RFM 分群](https://arxiv.org/abs/2008.08662)：借鉴行为分层问题；本项目无完整交易流水，因此不冒称实现标准 RFM 或生命周期价值。\n- [OECD / JRC, 2008 · 复合指标手册](https://doi.org/10.1787/9789264043466-en)：明确归一化、权重和敏感性；本项目的数值锚点不来自该手册。\n- [scikit-learn · 旋转因子分析](https://scikit-learn.org/stable/auto_examples/decomposition/plot_varimax_fa.html)：以载荷和独特方差解释共同结构，避免把因子得分当价值标签。")
+    st.download_button("下载当前情景参数", json.dumps(dict(scenario=asdict(scenario), product=product,
+        attention_weight=alpha, score_version="customer-observation-v1"), ensure_ascii=False, indent=2),
+        "customer_scenario.json", "application/json")
 
 
 def main():
-    st.set_page_config(page_title="睿衡 · 决策分析工作台", page_icon="◈", layout="wide")
+    st.set_page_config(page_title="睿衡 · 客户价值看板", page_icon="◈", layout="wide")
     style()
     if "api" not in st.session_state:
-        with st.spinner("正在准备工作台，首次启动需要训练演示模型…"):
+        with st.spinner("正在准备客户数据…"):
             config = get_config()
             if config.data_source.type == "mock":
                 activate_source(demo_source(), "模拟数据 · 120 位客户 · seed 42")
@@ -526,28 +262,102 @@ def main():
                 st.session_state.source_label = f"配置数据源 · {config.data_source.type}"
     api = st.session_state.api
     customers, products = source_tables(api.data_source)
-    with st.sidebar:
-        st.markdown('<div class="brand">◈ 睿衡引擎</div><div class="brand-sub">PRUDENCE / ANALYTICS STUDIO</div>', unsafe_allow_html=True)
-        page = st.radio("工作空间", PAGES, key="navigation", label_visibility="collapsed")
-        st.divider()
-        st.caption("当前数据源")
-        st.write(st.session_state.source_label)
-        st.caption(f"{len(customers)} 位客户 · {len(products)} 个产品")
-        st.divider()
-        st.caption("方法可解释 · 规则优先 · 结果可导出")
-        st.caption("教学与作品集原型，需结合机构规则与人工审核使用。")
-    if page == "总览":
-        overview(api, customers, products)
-    elif page == "决策分析":
-        decision_page(api, customers, products)
-    elif page == "多元统计":
-        statistics_page(api, customers)
-    elif page == "矩阵实验室":
-        matrix_page(api, customers)
-    elif page == "运筹优化":
-        optimization_page()
-    elif page == "博弈实验":
-        game_page()
-    else:
+    if customers.empty or products.empty:
+        st.info("请先导入非空客户表和产品表。")
         data_page(api, customers, products)
-    st.markdown('<div class="footer">PRUDENCE ENGINE · 睿衡分析工作台　/　探索数据，审慎决策。</div>', unsafe_allow_html=True)
+        return
+    with st.sidebar:
+        st.markdown('<div class="brand">◈ 睿衡引擎</div><div class="brand-sub">CUSTOMER INTELLIGENCE</div>', unsafe_allow_html=True)
+        st.caption(st.session_state.source_label)
+        ids = products.id.tolist()
+        product_id = st.selectbox("分析理财产品", ids, index=ids.index("P004") if "P004" in ids else 0,
+            key="product_id", format_func=lambda pid: f"{products.set_index('id').loc[pid, 'name']} · {pid}")
+    original = api.data_source.get_product(product_id)
+    scenario, product = scenario_controls(product_id, original)
+    with st.sidebar:
+        st.caption(f"生效条件：{product['risk']} · {product['lock']} 天 · ¥{product['min']:,.0f} 起")
+        with st.expander("评分与因子设置"):
+            alpha = st.slider("关注度权重（%）", 10, 90, 50, 10, key="attention_weight") / 100
+            n_factors = st.selectbox("提取因子数", [2, 3], key="n_factors")
+        st.divider()
+        levels = st.multiselect("适当性筛选", list(LEVELS.values()), default=list(LEVELS.values()), key="level_filter")
+        search = st.text_input("搜索客户姓名或 ID", key="customer_search")
+        st.caption("筛选只改变观察人群，不改变同一客户的评分、金额假设或因子坐标。")
+    frame = scenario_values(customer_scores(api.data_source, api.engines["suitability"], product_id,
+        product, alpha, planned_wealth_share=scenario.wealth_share), product, scenario)
+    frame["status"] = frame.suitability_level.map(LEVELS)
+    factors, factor_error = None, ""
+    try:
+        factors = factors_for(factor_inputs(api.data_source), n_factors)
+        frame = frame.join(factors["scores"])
+    except ValueError as error:
+        factor_error = str(error)
+    visible = frame.loc[frame.status.isin(levels)].copy()
+    if search:
+        visible = visible.loc[visible.customer_id.str.contains(search, case=False, regex=False) |
+                              visible['name'].fillna('').str.contains(search, case=False, regex=False)]
+    hero("PRUDENCE / CUSTOMER INTELLIGENCE", "看见客户特征，理解价值来源。", "一位客户，一个点。点击散点查看六维画像；调整利率和理财策略，探索同一群体的价值变化。")
+    st.caption(f"{st.session_state.source_label}　/　产品：{product.get('name', product_id)}　/　观察评分与年度价值情景")
+    a, b, c, d = st.columns(4)
+    a.metric("当前客户", len(visible), help="受左侧客户筛选影响")
+    b.metric("完整画像", f"{visible.score.notna().sum()} / {len(visible)}")
+    c.metric("规则可通过", int(visible.suitability_level.eq("ALLOW").sum()))
+    d.metric("情景年度贡献合计", f"¥{visible.annual_contribution.sum():,.0f}", help="含假设余额、利率、损失与成本；不是实际利润或客户终身价值。")
+    mode = st.radio("客户分布视角", MODES, horizontal=True, key="scatter_mode")
+    if not visible.empty:
+        if st.session_state.get("focus_customer") not in visible.index:
+            st.session_state.focus_customer = visible.score.sort_values(ascending=False, na_position="last").index[0]
+        x, y = ("engagement", "fit") if mode == MODES[0] else ("engagement", "annual_contribution")
+        if mode == MODES[2]:
+            if factors is not None:
+                x, y = "因子 1", "因子 2"
+            else:
+                st.info(factor_error + " 当前先显示关注度与匹配度。")
+                mode, x, y = MODES[0], "engagement", "fit"
+        plotted = visible.dropna(subset=[x, y])
+        context = hashlib.sha256((plotted[["customer_id", x, y, "status"]].to_json() + mode + str(alpha) +
+                                  product_id + json.dumps(asdict(scenario), sort_keys=True) +
+                                  str(st.session_state.get("selection_nonce", 0))).encode()).hexdigest()[:16]
+        key = f"customer_scatter_v1_{context}"
+        st.session_state.scatter_key = key
+        left, right = st.columns([1.65, 1], gap="large")
+        with left:
+            st.markdown("**客户分布**")
+            st.caption("点选查看画像 · 框选 / 套索形成服务候选 · 同位置客户可从右侧名单选择")
+            if not plotted.empty:
+                event = st.plotly_chart(scatter_figure(plotted, x, y, mode),
+                    use_container_width=True, key=key, on_select="rerun", selection_mode=("points", "box", "lasso"), config={"displaylogo": False})
+                selection = selected_customer_ids(event, plotted.index)
+            else:
+                st.info("当前视角没有完整坐标。仍可从右侧选择客户查看已有画像。")
+                selection = []
+            signature = (context, tuple(selection))
+            if st.session_state.get("last_point_selection") != signature:
+                if selection:
+                    st.session_state.focus_customer = selection[0]
+                st.session_state.last_point_selection = signature
+                st.session_state.selected_customers = selection
+            st.caption(f"显示 {len(plotted)} 个点 · {len(visible) - len(plotted)} 位缺少当前坐标 · 已圈选 {len(selection)} 位。颜色与点形表示适当性，分数不能覆盖拦截结果。")
+        with right:
+            row = profile_panel(visible, scenario)
+        profile_details(row, scenario)
+        tabs = st.tabs(["客户榜单", "共同因子与稳定性", "服务计划", "口径与研究", "数据与导入"])
+        with tabs[0]:
+            ranked = visible.sort_values("score", ascending=False, na_position="last")
+            output = ranked[list(DISPLAY)].rename(columns=DISPLAY)
+            st.dataframe(output.round(2), hide_index=True, use_container_width=True)
+            download_csv(output, "下载当前客户画像与价值", "customer_value_board.csv")
+        with tabs[1]:
+            structural_analysis(factors, factor_error, visible, row, alpha)
+        with tabs[2]:
+            service_plan(visible, product_id, st.session_state.get("selected_customers", []),
+                         json.dumps(dict(scenario=asdict(scenario), product=product, alpha=alpha), sort_keys=True))
+        with tabs[3]:
+            methodology(scenario, product, alpha)
+        with tabs[4]:
+            data_page(api, customers, products)
+    else:
+        st.info("当前筛选没有客户，请调整条件。")
+        with st.expander("数据与导入"):
+            data_page(api, customers, products)
+    st.markdown('<div class="footer">PRUDENCE ENGINE · 客户价值看板　/　数据有来源，评分有依据，情景可复算。</div>', unsafe_allow_html=True)
