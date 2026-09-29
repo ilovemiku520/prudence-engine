@@ -33,7 +33,7 @@ def test_integrated_dashboard_views_profile_and_filters(api):
     at = app(api)
     assert not at.exception, [e.message for e in at.exception]
     assert at.metric[0].value == "48"
-    assert len(at.tabs) == 5
+    assert len(at.tabs) == 6
     for mode in ["关注度 × 年度贡献", "因子 1 × 因子 2", "关注度 × 匹配度"]:
         at.radio(key="scatter_mode").set_value(mode).run()
         assert not at.exception, [e.message for e in at.exception]
@@ -91,3 +91,29 @@ def test_csv_export_preserves_chinese_and_neutralizes_formulas():
     from dashboard import csv_bytes
     output = csv_bytes(pd.DataFrame({"客户": ["=1+2", " +cmd", "张三"]})).decode("utf-8-sig")
     assert "'=1+2" in output and "' +cmd" in output and "张三" in output
+
+
+def test_ai_is_explicit_and_results_follow_current_context(api, monkeypatch):
+    import dashboard_ai
+    calls = []
+    def fake_explain(settings, context, question):
+        calls.append((settings, context, question))
+        return dict(text="这是模拟接口返回的测试解读。", model=settings.model, protocol=settings.protocol,
+                    endpoint="api.openai.com", elapsed_seconds=.01, usage={"total_tokens": 100}, truncated=False)
+    monkeypatch.setattr(dashboard_ai, "explain", fake_explain)
+    at = app(api)
+    assert not calls and at.button(key="ai_generate").disabled
+    at.text_input(key="ai_model_0").set_value("test-model").run()
+    at.text_input(key="ai_key_0").set_value("fake-ui-key").run()
+    assert not calls
+    click(at, "发送摘要并生成解读")
+    assert len(calls) == 1 and "selected_customer" not in calls[0][1]
+    assert any("模拟接口返回" in t.value for t in at.text)
+    at.radio(key="ai_scope").set_value("所选客户画像").run()
+    assert any("旧解读" in i.value for i in at.info)
+    click(at, "发送摘要并生成解读")
+    assert len(calls) == 2 and "selected_customer" in calls[1][1]
+    at.text_input(key="ai_base_0").set_value("https://other.example/v1").run()
+    assert at.text_input(key="ai_key_0").value == ""
+    assert at.button(key="ai_generate").disabled
+    assert not at.exception

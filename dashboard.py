@@ -14,6 +14,7 @@ from config import get_config
 from customer_scoring import (DIMENSIONS, SIGNALS, ValueScenario, composite, customer_scores,
                               factor_inputs, fit_factors, scenario_values, selected_customer_ids)
 from dashboard_data import (activate_source, chart, csv_bytes, data_page, download_csv, hero, style)
+from dashboard_ai import ai_panel
 from main import PrudenceAPI
 from workbench_data import demo_source, source_tables
 
@@ -342,20 +343,22 @@ def main():
         with right:
             row = profile_panel(visible, scenario)
         profile_details(row, scenario)
-        tabs = st.tabs(["客户榜单", "共同因子与稳定性", "服务计划", "口径与研究", "数据与导入"])
+        tabs = st.tabs(["客户榜单", "AI 辅助解读", "共同因子与稳定性", "服务计划", "口径与研究", "数据与导入"])
         with tabs[0]:
             ranked = visible.sort_values("score", ascending=False, na_position="last")
             output = ranked[list(DISPLAY)].rename(columns=DISPLAY)
             st.dataframe(output.round(2), hide_index=True, use_container_width=True)
             download_csv(output, "下载当前客户画像与价值", "customer_value_board.csv")
         with tabs[1]:
-            structural_analysis(factors, factor_error, visible, row, alpha)
+            ai_panel(visible, product, scenario, alpha, row, factors, factor_error)
         with tabs[2]:
+            structural_analysis(factors, factor_error, visible, row, alpha)
+        with tabs[3]:
             service_plan(visible, product_id, st.session_state.get("selected_customers", []),
                          json.dumps(dict(scenario=asdict(scenario), product=product, alpha=alpha), sort_keys=True))
-        with tabs[3]:
-            methodology(scenario, product, alpha)
         with tabs[4]:
+            methodology(scenario, product, alpha)
+        with tabs[5]:
             data_page(api, customers, products)
     else:
         st.info("当前筛选没有客户，请调整条件。")
