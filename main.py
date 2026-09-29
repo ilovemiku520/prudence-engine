@@ -6,31 +6,23 @@
 # main.py
 """
 睿衡引擎 - 主入口
-支持：决策 / 批量决策 / 评估 / API服务 / UI启动
+支持：决策 / 批量决策 / API 服务 / 统一看板
 支持：自定义数据源注入（用于文件上传等场景）
 """
 import sys
 import json
 import argparse
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 # 导入所有模块
-from config import get_config, AppConfig, Defaults
+from config import get_config, AppConfig
 from logger import get_logger, StructuredLogger
-from data_source import create_data_source, MockDataSource, DataSourceError, DataSource
+from data_source import create_data_source, DataSourceError, DataSource
 from prudence_suitability import SuitabilityMatrixConfig, SuitabilityEngine
 from intent_subsystem import IntentModel, IntentEngine, IntentTrainPipeline
 from aegis_decision import AegisDecisionEngine
 from nexus_orchestrator import NexusFeatureStore, NexusOrchestrator
-
-# 评估模块（可选）
-try:
-    from validity_evaluator import ValidityEvaluator, EvaluationDataGenerator
-except ImportError:
-    ValidityEvaluator = None
-
 
 # ================================================================
 # 1. 引擎工厂
@@ -79,31 +71,17 @@ class PrudenceFactory:
 
         # ---- 2. 加载产品数据库 ----
         product_db = []
-        try:
-            for pid in data_source.list_products():
-                prod = data_source.get_product(pid)
-                if prod:
-                    product_db.append({
-                        "id": pid,
-                        "risk_level": prod.get("risk", "R1"),
-                        "name": prod.get("name", ""),
-                        "lock_period": prod.get("lock", 0),
-                        "min_amount": prod.get("min", 0),
-                    })
-            logger.info(f"从数据源加载了 {len(product_db)} 个产品")
-        except Exception as e:
-            logger.warning(f"加载产品失败: {e}，使用默认产品库")
-
-        # 如果数据源没有产品，使用默认产品库
-        if not product_db:
-            logger.warning("数据源无产品，使用默认产品库")
-            product_db = [
-                {"id": "P001", "name": "天天利货币", "risk_level": "R1", "lock_period": 0, "min_amount": 0},
-                {"id": "P002", "name": "季季盈固收", "risk_level": "R2", "lock_period": 90, "min_amount": 10000},
-                {"id": "P004", "name": "一年平衡混合", "risk_level": "R3", "lock_period": 365, "min_amount": 100000},
-                {"id": "P005", "name": "进取科创主题", "risk_level": "R4", "lock_period": 730, "min_amount": 200000},
-                {"id": "P006", "name": "全球精选权益", "risk_level": "R5", "lock_period": 1095, "min_amount": 500000},
-            ]
+        for pid in data_source.list_products():
+            prod = data_source.get_product(pid)
+            if prod:
+                product_db.append({
+                    "id": pid,
+                    "risk_level": prod["risk"],
+                    "name": prod.get("name", ""),
+                    "lock_period": prod["lock"],
+                    "min_amount": prod["min"],
+                })
+        logger.info(f"从数据源加载了 {len(product_db)} 个产品")
 
         # ---- 3. 适当性引擎 ----
         matrix = SuitabilityMatrixConfig()
@@ -223,28 +201,6 @@ class PrudenceAPI:
         """获取产品详情"""
         return self.orchestrator.get_product_info(product_id)
 
-    def run_offline_job(self, date: Optional[str] = None) -> Dict:
-        """运行离线特征计算（模拟）"""
-        logger = get_logger()
-        target_date = date or datetime.now().strftime('%Y-%m-%d')
-        logger.info(f"运行离线特征计算: {target_date}")
-        return {"status": "completed", "date": target_date}
-
-    def generate_eval_report(self, report_name: str = "validity_report") -> Dict:
-        """生成评估报告"""
-        if ValidityEvaluator is None:
-            return {"error": "评估模块未安装 (validity_evaluator.py)"}
-
-        gen = EvaluationDataGenerator()
-        suit = gen.generate_suitability_samples(1500)
-        io = gen.generate_intent_samples(3000, False)
-        ion = gen.generate_intent_samples(2000, True)
-        ctrl = gen.generate_intent_samples(1000, True)
-        fusion = gen.generate_fusion_samples(800)
-
-        evaluator = ValidityEvaluator(self.config.report_output_dir)
-        return evaluator.generate_full_report(suit, io, ion, fusion, ctrl, report_name)
-
     def get_data_source_info(self) -> Dict:
         """获取当前数据源信息（用于调试/UI展示）"""
         ds = self.data_source
@@ -278,30 +234,29 @@ def main():
   # 启动 UI 仪表板
   python main.py --mode ui --port 8501
 
-  # 生成评估报告
-  python main.py --mode eval --report my_report
-
   # 使用配置文件
   python main.py --mode api --config config.json
         """
     )
     parser.add_argument(
         "--mode",
-        choices=["decision", "batch", "offline", "eval", "api", "ui"],
+        choices=["decision", "batch", "api", "ui"],
         default="decision",
         help="运行模式"
     )
     parser.add_argument("--customer", help="客户ID (decision模式)")
     parser.add_argument("--product", help="产品ID (decision模式)")
     parser.add_argument("--config", help="配置文件路径 (JSON)")
-    parser.add_argument("--date", default=datetime.now().strftime("%Y-%m-%d"), help="离线计算日期")
-    parser.add_argument("--report", default="validity_report", help="评估报告名称")
     parser.add_argument("--port", type=int, default=8501, help="UI端口 (ui模式)")
 
     args = parser.parse_args()
 
     # 加载配置
-    if args.config and Path(args.config).exists():
+    if args.config:
+        if args.mode == "ui":
+            parser.error("UI 子进程请使用环境变量配置；--config 仅用于 decision / batch / api。")
+        if not Path(args.config).is_file():
+            parser.error("指定的配置文件不存在。")
         config = AppConfig.from_file(args.config)
     else:
         config = get_config()
@@ -314,30 +269,19 @@ def main():
     )
     logger.info(f"睿衡引擎启动 | 模式: {args.mode}")
 
-    # 创建 API 实例（使用配置，不传入自定义数据源）
-    api = PrudenceAPI(config)
-
     # 执行
     if args.mode == "decision":
         if not args.customer or not args.product:
             print("错误: decision模式需要 --customer 和 --product")
             sys.exit(1)
-        result = api.decide(args.customer, args.product)
+        result = PrudenceAPI(config).decide(args.customer, args.product)
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
     elif args.mode == "batch":
         data = sys.stdin.read()
         requests = json.loads(data) if data else [{"customer_id": "CUST_HIGH", "product_id": "P004"}]
-        results = api.batch_decide(requests)
+        results = PrudenceAPI(config).batch_decide(requests)
         print(json.dumps(results, indent=2, ensure_ascii=False))
-
-    elif args.mode == "offline":
-        result = api.run_offline_job(args.date)
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    elif args.mode == "eval":
-        report = api.generate_eval_report(args.report)
-        print(f"评估报告已生成: {config.report_output_dir}/{args.report}.json")
 
     elif args.mode == "api":
         from api import create_app
@@ -356,13 +300,12 @@ def main():
     elif args.mode == "ui":
         # 启动 Streamlit UI
         import subprocess
-        import os
         ui_path = Path(__file__).parent / "ui.py"
         if not ui_path.exists():
             print(f"错误: ui.py 不存在于 {ui_path}")
             sys.exit(1)
         logger.info(f"启动 UI 仪表板: http://localhost:{args.port}")
-        subprocess.run(["streamlit", "run", str(ui_path), "--server.port", str(args.port)])
+        subprocess.run([sys.executable, "-m", "streamlit", "run", str(ui_path), "--server.port", str(args.port)], check=True)
 
     else:
         print("未知模式")

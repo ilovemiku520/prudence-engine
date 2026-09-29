@@ -344,6 +344,11 @@ def build_dataframe_data_source(
     """
     import pandas as pd
 
+    from workbench_data import validate_table
+    customers_df = validate_table(customers_df, "customers")
+    products_df = validate_table(products_df, "products")
+    intent_df = validate_table(intent_df, "intent_features")
+
     customers = {}
     if customers_df is not None and not customers_df.empty:
         for _, row in customers_df.iterrows():
@@ -354,10 +359,12 @@ def build_dataframe_data_source(
                     'age': int(row['age']),
                     'assets': float(row['assets']),
                     'period': int(row['period']),
-                    'first_buy': bool(row.get('first_buy', False)),
+                    'first_buy': row.get('first_buy', False),
                     'name': str(row.get('name', '')),
                     'income': str(row.get('income', ''))
                 }
+                if 'loan_balance' in row and pd.notna(row['loan_balance']):
+                    customers[cid]['loan_balance'] = float(row['loan_balance'])
 
     products = {}
     if products_df is not None and not products_df.empty:
@@ -382,6 +389,9 @@ def build_dataframe_data_source(
                 if fname is not None and fval is not None:
                     intent_features.setdefault(cid, {})[fname] = float(fval)
 
+    unknown = set(intent_features) - set(customers)
+    if unknown:
+        raise ValueError("意图特征中包含客户表中不存在的客户。")
     return MemoryDataSource(customers, products, intent_features)
 
 

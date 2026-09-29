@@ -7,19 +7,23 @@
 """
 API 服务层 - 提供 RESTful 接口
 """
-from typing import Optional, Dict, Any, List
-from fastapi import FastAPI, HTTPException, Depends, Header, Request
+from typing import Optional, List, Literal
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 import time
 import secrets
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 
 # 导入各模块
 from main import PrudenceAPI
 from config import get_config, AppConfig
 from logger import get_logger, record_decision, pseudonymize_identifier
+from ai_explainer import AIError, AISettings, explain
+from analysis_context import build_context, context_signature
+from customer_scoring import ValueScenario, customer_scores, scenario_values, factor_inputs, fit_factors
 
 
 # ================================================================
@@ -99,18 +103,29 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class AnalysisExplainRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    product_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.:-]+$")
+    scope: Literal["overview", "customer", "factors"] = "overview"
+    customer_id: Optional[str] = Field(None, min_length=1, max_length=64)
+    customer_ids: Optional[List[str]] = Field(None, min_length=1, max_length=500)
+    question: str = Field("解释主要发现、数值依据和局限。", min_length=1, max_length=1500)
+    scenario: ValueScenario = Field(default_factory=ValueScenario)
+    attention_weight: float = Field(.5, ge=.1, le=.9, allow_inf_nan=False)
+
+
 # ================================================================
 # 2. 应用初始化
 # ================================================================
 
-def create_app(config: Optional[AppConfig] = None) -> FastAPI:
+def create_app(config: Optional[AppConfig] = None, ai_settings: Optional[AISettings] = None) -> FastAPI:
     """创建 FastAPI 应用"""
     if config is None:
         config = get_config()
 
     app = FastAPI(
         title="睿衡引擎 API",
-        description="适当性与意图联合决策引擎",
+        description="客户价值分析原型：适当性优先的决策接口与多模型 AI 辅助解读",
         version="2.0.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
@@ -166,6 +181,46 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             "version": "2.0.0",
             "timestamp": datetime.now().isoformat()
         }
+
+    @app.post("/api/analysis/explain", dependencies=[Depends(require_admin)])
+    def analysis_explanation(request: AnalysisExplainRequest):
+        """Explicit outbound AI request; provider/credentials are server-controlled.
+
+        The caller authorizes sending the calculated, de-identified numeric summary
+        and question to the configured provider. Never alters any decision or data.
+        """
+        if ai_settings is None and os.getenv("AI_ENABLED", "false").lower() != "true":
+            raise HTTPException(status_code=503, detail="AI 解释接口未启用")
+        try:
+            settings = ai_settings or AISettings.from_env()
+            settings.validate()
+            request.scenario.validate()
+            api = get_prudence_api()
+            product = api.data_source.get_product(request.product_id)
+            if not product:
+                raise ValueError("产品不存在。")
+            frame = scenario_values(customer_scores(api.data_source, api.engines["suitability"], request.product_id,
+                product, request.attention_weight, request.scenario.wealth_share), product, request.scenario)
+            if request.customer_ids is not None:
+                if not set(request.customer_ids).issubset(frame.index):
+                    raise ValueError("筛选列表包含不存在的客户。")
+                frame = frame.loc[frame.index.isin(request.customer_ids)]
+            factors, factor_error = None, ""
+            if request.scope == "factors":
+                try:
+                    factors = fit_factors(factor_inputs(api.data_source))
+                except ValueError:
+                    factor_error = "因子分析未满足计算条件。"
+            context = build_context(frame, product, request.scenario, request.attention_weight,
+                scope=request.scope, selected_id=request.customer_id, factors=factors, factor_error=factor_error,
+                synthetic=config.data_source.type == "mock")
+            result = explain(settings, context, request.question)
+            return dict(result, context_digest=context_signature(context, request.question, settings),
+                        generated_at=datetime.now(timezone.utc).isoformat(), advisory_only=True)
+        except AIError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from None
+        except (ValueError, KeyError):
+            raise HTTPException(status_code=422, detail="无法构建分析摘要，请检查客户、产品、范围和情景参数。") from None
 
     @app.post("/api/decision", response_model=DecisionResponse)
     async def single_decision(
@@ -261,11 +316,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     ):
         """获取所有客户列表"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                customers = ds.list_customers()
-                return {"customers": customers, "total": len(customers)}
-            return {"customers": ["CUST_HIGH", "CUST_LOW", "CUST_ELDER"], "total": 3}
+            customers = api.data_source.list_customers()
+            return {"customers": customers, "total": len(customers)}
         except Exception:
             raise HTTPException(status_code=500, detail="服务内部错误")
 
@@ -275,11 +327,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     ):
         """获取所有产品列表"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                products = ds.list_products()
-                return {"products": products, "total": len(products)}
-            return {"products": ["P001", "P002", "P004", "P005", "P006"], "total": 5}
+            products = api.data_source.list_products()
+            return {"products": products, "total": len(products)}
         except Exception:
             raise HTTPException(status_code=500, detail="服务内部错误")
 
@@ -291,13 +340,10 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     ):
         """获取客户详情"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                info = ds.get_customer(customer_id)
-                if not info:
-                    raise HTTPException(status_code=404, detail="客户不存在")
-                return info
-            return {"error": "未找到数据源"}
+            info = api.data_source.get_customer(customer_id)
+            if not info:
+                raise HTTPException(status_code=404, detail="客户不存在")
+            return info
         except HTTPException:
             raise
         except Exception:
@@ -310,13 +356,10 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     ):
         """获取产品详情"""
         try:
-            ds = api.engines.get("data_source")
-            if ds:
-                info = ds.get_product(product_id)
-                if not info:
-                    raise HTTPException(status_code=404, detail="产品不存在")
-                return info
-            return {"error": "未找到数据源"}
+            info = api.data_source.get_product(product_id)
+            if not info:
+                raise HTTPException(status_code=404, detail="产品不存在")
+            return info
         except HTTPException:
             raise
         except Exception:

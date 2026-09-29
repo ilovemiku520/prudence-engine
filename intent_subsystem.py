@@ -6,14 +6,11 @@
 # intent_subsystem.py
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 import pickle
 import os
-import warnings
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, classification_report
+from sklearn.metrics import roc_auc_score
 import xgboost as xgb
 
 # SHAP 可选
@@ -143,8 +140,8 @@ class IntentModel:
             ]
             contribs.sort(key=lambda x: abs(x["shap_value"]), reverse=True)
             return contribs[:top_k]
-        # 降级方案
-        return [{"feature": "rule_score", "shap_value": 0.5, "impact": "positive"}]
+        # No fabricated SHAP attribution when the explainer is unavailable.
+        return []
 
 # ================================================================
 # 4. 意图引擎（主逻辑）
@@ -185,6 +182,9 @@ class IntentEngine:
         return self.fused_intent_score_from_features(features)
 
     def fused_intent_score_from_features(self, features: Dict[str, float]) -> Dict:
+        features = {name: float(features.get(name, 0.0)) for name in ALL_FEATURE_NAMES}
+        if not all(np.isfinite(value) and value >= 0 for value in features.values()):
+            raise ValueError("意图特征必须为非负有限数值")
         r_score = compute_rule_score(features)
         m_score = 0.0
         if self.model.is_trained:
@@ -202,9 +202,12 @@ class IntentEngine:
         final = round(min(max(final, 0.0), 1.0), 4)
         top_signals = []
         if self.model.is_trained:
-            top_signals = self.model.explain(features, 3)
+            try:
+                top_signals = self.model.explain(features, 3)
+            except Exception as error:
+                logger.warning(f"SHAP 解释暂不可用: {error}")
         else:
-            top_signals = [{"feature": "rule_score", "shap_value": r_score, "impact": "positive"}]
+            top_signals = []
         return {
             "intent_score": final,
             "rule_score": round(r_score, 4),

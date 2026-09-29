@@ -9,9 +9,8 @@
 """
 import os
 import json
-from typing import Dict, Any, Optional, List
+from typing import Dict, Optional, List
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 # ================================================================
@@ -39,9 +38,7 @@ class Defaults:
     # 特征存储
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
-    REDIS_DB = 0
     REDIS_ENABLE = False
-    CACHE_TTL = 3600
 
     # API
     API_HOST = "0.0.0.0"
@@ -50,11 +47,8 @@ class Defaults:
 
     # 日志
     LOG_LEVEL = "INFO"
-    LOG_FORMAT = "json"
     LOG_DIR = "./logs"
 
-    # 矩阵
-    MATRIX_VERSION = "v1.0"
 
 
 @dataclass
@@ -91,19 +85,10 @@ class IntentConfig:
 
 
 @dataclass
-class SuitabilityConfig:
-    """适当性引擎配置"""
-    matrix_version: str = Defaults.MATRIX_VERSION
-    enable_rules: bool = True
-    enable_financial_check: bool = True
-    enable_period_check: bool = True
-@dataclass
 class FeatureStoreConfig:
     redis_host: str = "localhost"
     redis_port: int = 6379
-    redis_db: int = 0
     enable_redis: bool = Defaults.REDIS_ENABLE
-    cache_ttl: int = 3600
 
 
 @dataclass
@@ -115,7 +100,6 @@ class APIConfig:
     cors_origins: List[str] = field(
         default_factory=lambda: ["http://localhost:8501", "http://127.0.0.1:8501"]
     )
-    rate_limit_per_minute: int = 60
     admin_token: str = ""
 
 
@@ -123,11 +107,7 @@ class APIConfig:
 class LoggerConfig:
     """日志配置"""
     level: str = Defaults.LOG_LEVEL
-    format: str = Defaults.LOG_FORMAT
     output_dir: str = Defaults.LOG_DIR
-    max_size_mb: int = 100
-    retention_days: int = 30
-    enable_audit: bool = True
 
 
 @dataclass
@@ -135,13 +115,10 @@ class AppConfig:
     """应用总配置"""
     data_source: DataSourceConfig = field(default_factory=DataSourceConfig)
     intent: IntentConfig = field(default_factory=IntentConfig)
-    suitability: SuitabilityConfig = field(default_factory=SuitabilityConfig)
     feature_store: FeatureStoreConfig = field(default_factory=FeatureStoreConfig)
     api: APIConfig = field(default_factory=APIConfig)
     logger: LoggerConfig = field(default_factory=LoggerConfig)
 
-    enable_auth: bool = True
-    report_output_dir: str = "./reports"
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -174,12 +151,10 @@ class AppConfig:
         feature_store = config.feature_store
         feature_store.redis_host = os.getenv("REDIS_HOST", Defaults.REDIS_HOST)
         feature_store.redis_port = int(os.getenv("REDIS_PORT", str(Defaults.REDIS_PORT)))
-        feature_store.redis_db = int(os.getenv("REDIS_DB", str(Defaults.REDIS_DB)))
         feature_store.enable_redis = os.getenv("REDIS_ENABLE", "false").lower() == "true"
 
         logger = config.logger
         logger.level = os.getenv("LOG_LEVEL", Defaults.LOG_LEVEL)
-        logger.format = os.getenv("LOG_FORMAT", Defaults.LOG_FORMAT)
         logger.output_dir = os.getenv("LOG_DIR", Defaults.LOG_DIR)
 
         return config
@@ -225,7 +200,6 @@ class AppConfig:
             },
             "logger": {
                 "level": self.logger.level,
-                "format": self.logger.format,
                 "output_dir": self.logger.output_dir,
             }
         }

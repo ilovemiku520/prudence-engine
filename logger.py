@@ -9,9 +9,8 @@
 """
 import json
 import sys
-import traceback
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Optional, List
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
